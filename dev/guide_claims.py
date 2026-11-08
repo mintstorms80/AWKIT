@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """guide_claims.py - executes what docs/GUIDE.bg.md + GUIDE.en.md SAY against the real kit.
 Every claim = (label, ok, got). Run:  python3 guide_claims.py [KIT_DIR]   Exit 0 only if all claims hold.
-Author-side QA, not installed. Needs Python >= 3.12 (shutil.rmtree onexc)."""
+Author-side QA, not installed. Python 3.11+ (rmtree takes onexc only from 3.12, so the hook name follows the version)."""
 import atexit, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 
@@ -42,9 +42,9 @@ def _rm(func, path, exc):
 
 
 if W.exists():
-    shutil.rmtree(W, onexc=_rm)
+    shutil.rmtree(W, **{"onexc" if sys.version_info >= (3, 12) else "onerror": _rm})
 W.mkdir(parents=True)
-atexit.register(lambda: shutil.rmtree(W, onexc=_rm) if W.exists() else None)
+atexit.register(lambda: shutil.rmtree(W, **{"onexc" if sys.version_info >= (3, 12) else "onerror": _rm}) if W.exists() else None)
 P = W / "p"
 
 # ---- 1.2 install

@@ -55,7 +55,7 @@ def rm(path):
     def onexc(fn, p, _exc):   # git objects are read-only on Windows
         os.chmod(p, 0o700)
         fn(p)
-    shutil.rmtree(path, onexc=onexc)
+    shutil.rmtree(path, **{"onexc" if sys.version_info >= (3, 12) else "onerror": onexc})
 
 
 def put(P, rel, text):
