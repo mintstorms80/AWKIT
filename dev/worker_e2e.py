@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """worker_e2e.py - LIVE test of the Worker soul. Author-side QA, not installed; it needs a model, so selftest does not run it.
-  python3 dev/worker_e2e.py run [SECONDS]        build a scratch project, run the `worker` profile on 2 cards (killed after SECONDS, default 1500), re-measure
+  python3 dev/worker_e2e.py run [SECONDS]        build a scratch project, run the `deepseek-worker` profile on 2 cards (killed after SECONDS, default 1500), re-measure
   python3 dev/worker_e2e.py selfcheck            no model: verify must FAIL on the untouched project and PASS after `simulate` (the harness tests itself)
   python3 dev/worker_e2e.py build DIR            only the project: calc.py + 3 tests, T-001 (characterization, RED PROOF n/a) and CHK-001 (census; one file is added
                                                  after the dry run, so its total differs from the card = a witness); lint, queue-check and dry run must be clean
@@ -316,7 +316,7 @@ def build(P):
     P = Path(P).resolve()
     if P.exists() and any(P.iterdir()):
         sys.exit(f"BUILD FAIL {P} is not empty")
-    r = subprocess.run([sys.executable, str(KIT / "init_project.py"), str(P), "--name", "e2e", "--lang", "bg", "--owner", "the owner"],
+    r = subprocess.run([sys.executable, str(KIT / "init_project.py"), str(P), "--name", "e2e", "--lang", "bg", "--owner", "Owner"],
                        capture_output=True, text=True, encoding="utf-8")
     assert r.returncode == 0, r.stdout
     put(P, "calc.py", "def add(a, b):\n    return a + b\n\n\ndef div(a, b):\n    return a / b\n")
@@ -404,7 +404,7 @@ def run(limit=1500, build_fn=None, verify_fn=None, prefix="awkit_worker_e2e_", t
     print(f"The worker is running in {W}, silent until it ends (30 s per call when the provider is fast, 10+ minutes when it is not).", flush=True)
     ans = W / "worker_answer.txt"
     with ans.open("wb") as fh:
-        pr = subprocess.Popen(["hermes", "-p", "worker", "chat", "--query-file", str(W / "start_block.txt"), "--oneshot", "-Q", "--yolo",
+        pr = subprocess.Popen(["hermes", "-p", "deepseek-worker", "chat", "--query-file", str(W / "start_block.txt"), "--oneshot", "-Q", "--yolo",
                                "--max-turns", str(turns), "--in", str(W / "proj")], stdout=fh, stderr=subprocess.STDOUT, env=ENV)
         try:
             pr.wait(timeout=limit)

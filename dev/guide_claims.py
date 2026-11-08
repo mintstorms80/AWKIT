@@ -48,10 +48,10 @@ atexit.register(lambda: shutil.rmtree(W, **{"onexc" if sys.version_info >= (3, 1
 P = W / "p"
 
 # ---- 1.2 install
-rc, out = run([PY, str(KIT / "init_project.py"), str(P), "--name", "Walk", "--lang", "bg", "--owner", "the owner"], W)
+rc, out = run([PY, str(KIT / "init_project.py"), str(P), "--name", "Walk", "--lang", "bg", "--owner", "Owner"], W)
 claim("1.2 install prints INSTALLED ... 0 collision(s) staged in kit_stage/ (lang=bg)", rc == 0 and re.search(r"INSTALLED into .*: \d+ new file\(s\), 0 collision\(s\) staged in kit_stage/ \(lang=bg\)", out), out)
 claim("1.2 installed tree has no bytecode (installer must not copy __pycache__)", not any("__pycache__" in x.parts or x.suffix == ".pyc" for x in P.rglob("*")), [str(x) for x in P.rglob("*.pyc")])
-claim("1.2 GUIDE.md is Bulgarian, addressed to the owner, no placeholder left", (P / ".hermes/plans/GUIDE.md").read_text(encoding="utf-8").startswith("# РЪКОВОДСТВО - Walk") and "the owner" in (P / ".hermes/plans/GUIDE.md").read_text(encoding="utf-8") and "{{" not in (P / ".hermes/plans/GUIDE.md").read_text(encoding="utf-8"))
+claim("1.2 GUIDE.md is Bulgarian, addressed to the owner, no placeholder left", (P / ".hermes/plans/GUIDE.md").read_text(encoding="utf-8").startswith("# РЪКОВОДСТВО - Walk") and "Owner" in (P / ".hermes/plans/GUIDE.md").read_text(encoding="utf-8") and "{{" not in (P / ".hermes/plans/GUIDE.md").read_text(encoding="utf-8"))
 rc, out = run([PY, str(KIT / "init_project.py"), "--check", str(P)], W)
 claim("1.2 --check ends with KIT-CHECK engine_same=<n> engine_diff=0 missing=0", re.search(r"KIT-CHECK engine_same=\d+ engine_diff=0 missing=0\s*$", out.strip()), out[-200:])
 rc, out = run([PY, str(KIT / "init_project.py"), str(P), "--name", "Walk"], W)
