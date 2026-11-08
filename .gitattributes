@@ -1,0 +1,7 @@
+# awkit: markdown, python and shell are LF; Windows batch wrappers keep CRLF.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.pdf binary

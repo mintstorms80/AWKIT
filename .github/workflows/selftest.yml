@@ -1,0 +1,27 @@
+name: selftest
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: selftest (end to end, green and red paths)
+        run: python -I -B selftest.py
+      - name: kit-lint (docs against the real command surface)
+        run: python -I -B selftest.py --lint-only
+      - name: owner guides execute their own claims
+        run: python dev/guide_claims.py

@@ -1,0 +1,12 @@
+# Example independent check: leftover debug tags. Rename to example_debug_tags.py to activate.
+# A worker tags every debug print [DEBUG-<hex>] so cleanup is one grep; this check proves it happened.
+import pathlib, re, sys
+SKIP = {".git", ".venv", "node_modules", "__pycache__", ".aw", ".hermes"}
+scanned = n = 0
+for p in pathlib.Path(".").rglob("*"):
+    if p.is_file() and p.suffix in {".py", ".js", ".ts", ".sh", ".rs", ".go", ".java"} and not (SKIP & set(p.parts)):
+        scanned += 1
+        n += len(re.findall(r"\[DEBUG-[0-9a-f]{3,}\]", p.read_text(encoding="utf-8", errors="ignore")))
+if scanned == 0:
+    sys.exit("debug_tags scanned 0 files (wrong cwd or suffix list): a check that saw nothing proves nothing")
+print("ZERO debug_tags", n)

@@ -1,0 +1,5 @@
+# Example independent check: count TODO/FIXME markers. Rename to example_todo_count.py to activate.
+import pathlib, re
+n = sum(len(re.findall(r"\b(TODO|FIXME)\b", p.read_text(encoding="utf-8", errors="ignore")))
+        for p in pathlib.Path(".").rglob("*.py") if ".venv" not in p.parts and "node_modules" not in p.parts)
+print("METRIC todo", n)

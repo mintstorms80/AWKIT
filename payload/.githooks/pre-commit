@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Optional pre-commit guard (the Author enables it once per clone: git config core.hooksPath .githooks).
+# Refuses a commit while `aw.py integrity` fails (a frozen file changed without the Architect's re-baseline).
+# Bypass for one commit: SKIP_PRECOMMIT=1 git commit ...   The gate (tests) is NOT run here: it can take minutes.
+if [ -n "${SKIP_PRECOMMIT:-}" ]; then
+    echo "pre-commit: SKIP_PRECOMMIT set, integrity NOT checked"
+    exit 0
+fi
+cd "$(git rev-parse --show-toplevel)" || exit 1
+PY="$(command -v python3 || command -v python)"
+if [ -z "$PY" ]; then
+    echo "pre-commit: no python on PATH, integrity NOT checked (set SKIP_PRECOMMIT=1 to silence)" >&2
+    exit 0
+fi
+if ! "$PY" -I -B tools/aw.py integrity; then
+    echo "pre-commit: integrity FAILED - the Architect re-baselines first (integrity --write-baseline --i-am-architect)" >&2
+    exit 1
+fi

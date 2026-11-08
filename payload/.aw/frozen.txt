@@ -1,0 +1,9 @@
+# Globs (relative to repo root, fnmatch: * also crosses /) of files THIS PROJECT freezes on top of the implicit core.
+# Always frozen without being listed here (E3): tools/*, .aw/frozen.txt, .aw/secrets_allow.txt, .aw/checks.d/**,
+#   .hermes/prompts/*, AGENTS.md, .hermes/plans/TASK_CARD.template.md
+# A change to any frozen file FAILS `aw.py integrity` until the ARCHITECT re-baselines:
+#   python3 tools/aw.py integrity --write-baseline --i-am-architect [--allow path/suffix]
+# Examples (delete the leading # to activate):
+#   docs/source/*
+#   schemas/*.json
+#   tests/contracts/*
