@@ -570,7 +570,7 @@ def cmd_patch(pos, fl, kv) -> int:
     repl = [(c, endings[min(n, len(endings) - 1)] if n < len(endings) else endings[-1]) for n, c in enumerate(nl)]
     if len(repl) > len(span) and repl[-1][1] == "": repl[-1] = (repl[-1][0], "\n")  # a grown block must not glue itself onto the next line
     lines = lines[:i0] + repl + lines[i0 + len(ol):]; f.write_bytes("".join(c + e for c, e in lines).encode("utf-8"))
-    print(f"PATCH OK {f} (line endings kept: {'CRLF' if b'\r\n' in rawf else 'LF'})")
+    print("PATCH OK %s (line endings kept: %s)" % (f, "CRLF" if b"\r\n" in rawf else "LF"))
     return 0
 
 

@@ -1,6 +1,7 @@
 name: selftest
 
 # Windows is the platform the maintainer measured (163 checks, green and red paths).
+# Python: 3.11 and 3.14 measured locally; the matrix runs 3.11 and 3.13 (3.11 caught one 3.12-only f-string).
 # A Linux/macOS job is welcome as a pull request: the suite skips the cmd.exe tests there,
 # but nobody has run it on Linux yet, so it is not claimed to pass.
 

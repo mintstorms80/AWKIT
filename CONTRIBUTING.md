@@ -2,6 +2,8 @@
 
 ## Before any change
 
+Requirements: Python 3.11+ (the suite is measured on 3.11 and 3.14; CI runs 3.11 and 3.13).
+
 1. `python3 -I -B selftest.py` must print `SELFTEST PASS failures=0 checks=N`. Read `N` from the run, never from a doc:
    the count grows with every rule.
 2. `python3 -I -B selftest.py --lint-only` — the doc-rot guard: every command and path a document names must exist.

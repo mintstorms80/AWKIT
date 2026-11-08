@@ -4,6 +4,8 @@ What it is: a file-based protocol + a small stdlib engine (`tools/aw.py`) so a s
 (Worker) cooperate without drift: exact task cards, a ratcheted gate, independent checks, an append-only ledger, one
 question channel — and an engine that tells you when its own environment is lying to you.
 
+Requirements: Python 3.11+ (measured on 3.11 and 3.14), git, and on Windows git-bash for `tools/gate.sh`.
+
 New to this? Read `docs/START_HERE.md` (one page, English), then `docs/GUIDE.en.md` (a Bulgarian translation ships as `docs/GUIDE.bg.md`).
 
 ## One-click start (Windows, no commands)
