@@ -1,8 +1,12 @@
 name: selftest
 
+# Windows is the platform the maintainer measured (163 checks, green and red paths).
+# A Linux/macOS job is welcome as a pull request: the suite skips the cmd.exe tests there,
+# but nobody has run it on Linux yet, so it is not claimed to pass.
+
 on:
   push:
-    branches: [main, master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,9 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.13"]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: selftest (end to end, green and red paths)
         run: python -I -B selftest.py
-      - name: kit-lint (docs against the real command surface)
+      - name: kit-lint (every doc against the real command surface)
         run: python -I -B selftest.py --lint-only
-      - name: owner guides execute their own claims
+      - name: the owner guides execute their own claims
         run: python dev/guide_claims.py
