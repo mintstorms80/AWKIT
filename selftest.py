@@ -467,6 +467,1518 @@ Architect: re-baseline? no.
 """
 
 
+def section_gaps(work: Path):
+    """Behaviour that a one-token change of aw.py could alter with the suite still green.
+    Found by mutating the engine (2.8.1: 81 of 200 sampled mutants survived); each check below fails on at least one of them."""
+    print("\n-- gaps found by mutating the engine")
+    G = new_project(work, "gaps")
+    plans = G / ".hermes/plans"
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    # ---- dispatch
+    rc0, o0 = aw(G)
+    rc1, o1 = aw(G, "--help")
+    rc2, o2 = aw(G, "gat")
+    rc3, o3 = aw(G, "gate", "--nope")
+    check("dispatch: no command -> the command list and exit 2; --help -> exit 0; a typo names the nearest command; an unknown flag -> exit 2",
+          rc0 == 2 and "card-lint" in o0 and rc1 == 0 and "card-lint" in o1 and rc2 == 2 and "did you mean `gate`?" in o2
+          and rc3 == 2 and "unknown flag --nope" in o3 and "Traceback" not in o0 + o1 + o2 + o3, (rc0, rc1, rc2, o2, rc3, o3))
+
+    # ---- gate: a count that was never parsed is a FAIL at any floor
+    env0 = (G / "tools/kit.env").read_text(encoding="utf-8")
+    put(G, "tools/kit.env", env0.replace("COUNT_REGEX=Ran (\\d+) tests?", "COUNT_REGEX=Nope (\\d+)"))
+    rc, out = aw(G, "gate", "nocount")
+    check("RED: a green suite whose output never matches COUNT_REGEX -> GATE FAIL count=0 min=0 reason=no-count-parsed (floor 0 forgives nothing)",
+          rc == 1 and "GATE FAIL count=0 min=0 reason=no-count-parsed" in out, out)
+    put(G, "tools/kit.env", env0.replace("TEST_DIR=.", "TEST_DIR=no_such_dir"))
+    rc, out = aw(G, "gate", "nodir")
+    check("RED: TEST_DIR that is not a directory -> exit 2 naming kit.env, no gate file", rc == 2 and "is not a directory" in out
+          and not (plans / "gate_output/nodir.txt").exists(), out)
+    put(G, "tools/kit.env", env0)
+
+    # ---- ask / answer
+    (plans / "QUESTIONS.md").unlink()
+    rc1, o1 = aw(G, "ask", "first?")
+    rc2, o2 = aw(G, "ask", "second?")
+    rc3, o3 = aw(G, "ask")
+    q = (plans / "QUESTIONS.md").read_text(encoding="utf-8")
+    check("ask: creates a missing QUESTIONS.md; the second question is Q-002 and the first one stays; no text -> usage, exit 2",
+          rc1 == 0 and "ASKED Q-001" in o1 and "ASKED Q-002" in o2 and "## Q-001 |" in q and "> first?" in q and "> second?" in q
+          and rc3 == 2 and "usage" in o3, (o1, o2, rc3, o3, q))
+    aw(G, "answer", "Q-001", "180000", "ms")
+    put(G, ".hermes/plans/QUESTIONS.md", (plans / "QUESTIONS.md").read_text(encoding="utf-8").rstrip("\n"))
+    aw(G, "answer", "Q-002", "yes")
+    rcb, ob = aw(G, "answer", "QQ-1", "x")
+    q = (plans / "QUESTIONS.md").read_text(encoding="utf-8")
+    check("answer: every word reaches the ANSWER line; one line break before it with or without a trailing newline in the file; a bad id -> exit 2",
+          bool(re.search(r"(?m)^ANSWER Q-001 \d{4}-\d\d-\d\d 180000 ms$", q)) and bool(re.search(r"(?m)^ANSWER Q-002 \d{4}-\d\d-\d\d yes$", q))
+          and "\n\nANSWER" not in q and rcb == 2 and "'QQ-1' is not a question id" in ob, (q[-300:], rcb, ob))
+
+    # ---- report: the newest gate file, not a neighbour
+    aw(G, "gate", "older")
+    aw(G, "gate", "newer")
+    t = time.time()
+    for f in (plans / "gate_output").glob("*.txt"):
+        os.utime(f, (t - 900, t - 900) if f.name != "newer.txt" else (t, t))
+    aw(G, "report")
+    rep = (plans / "REPORT_latest.md").read_text(encoding="utf-8")
+    check("report: `last gate file` is the newest file in gate_output/", "last gate file: newer.txt @ " in rep, rep[:400])
+
+    # ---- restore: a file the card created is reported, never deleted
+    put(G, "src/x.py", "v1\n")
+    aw(G, "start", "T-060")
+    aw(G, "backup", "T-060", "src/x.py")
+    put(G, "src/x.py", "v2\n")
+    put(G, "src/new.py", "created by the card\n")
+    rc, out = aw(G, "restore", "T-060")
+    check("restore: puts the backup back, prints NOT-RESTORED-NEW for a file the card created and leaves that file in place",
+          rc == 0 and "NOT-RESTORED-NEW src/new.py" in out and "RESTORED 1 file(s) from backups/T-060/" in out
+          and (G / "src/x.py").read_bytes() == b"v1\n" and (G / "src/new.py").is_file(), out)
+
+    # ---- patch: a block that grows keeps every line break, at EOF and with mixed endings
+    put(G, "old_g.txt", "a = 1\n")
+    put(G, "new_g.txt", "a = 1\nb = 2\n")
+    put(G, "src/eof.txt", b"x = 0\na = 1")
+    put(G, "src/eofcr.txt", b"x = 0\r\na = 1")
+    rc1, o1 = aw(G, "patch", "src/eof.txt", "old_g.txt", "new_g.txt")
+    rc2, o2 = aw(G, "patch", "src/eofcr.txt", "old_g.txt", "new_g.txt")
+    check("patch: the last line of a file without a final newline grows into two lines, not into one glued line (2.8.1 wrote `a = 1b = 2`)",
+          rc1 == 0 and (G / "src/eof.txt").read_bytes() == b"x = 0\na = 1\nb = 2"
+          and rc2 == 0 and (G / "src/eofcr.txt").read_bytes() == b"x = 0\r\na = 1\r\nb = 2", ((G / "src/eof.txt").read_bytes(), (G / "src/eofcr.txt").read_bytes()))
+    put(G, "src/mixg.py", b"a = 1\r\nb = 2\nc = 3\n")
+    put(G, "old_m.txt", "a = 1\nb = 2\n")
+    put(G, "new_m.txt", "a = 1\nb = 2\nb2 = 7\n")
+    rc, out = aw(G, "patch", "src/mixg.py", "old_m.txt", "new_m.txt")
+    check("patch: a grown block in a mixed-ending file gives the added line the ending of the block's last line",
+          rc == 0 and (G / "src/mixg.py").read_bytes() == b"a = 1\r\nb = 2\nb2 = 7\nc = 3\n", (G / "src/mixg.py").read_bytes())
+
+    # ---- doctor: the OK lines of a fresh install, and the two WARNs they turn into
+    rc, out = aw(G, "doctor")
+    put(G, ".gitignore", ".env\nbackups/\nkit_stage/\n")
+    (G / "AGENTS.md").rename(G / "AGENTS.md.off")
+    rc2, out2 = aw(G, "doctor")
+    (G / "AGENTS.md.off").rename(G / "AGENTS.md")
+    check("doctor: fresh install prints OK for kit-files and kit-v2 and WARN for a .gitignore without .env; "
+          "a covering .gitignore -> OK; a missing AGENTS.md -> WARN kit-v2 naming it",
+          "DOCTOR OK kit-files: all present" in out and "DOCTOR OK kit-v2: all present" in out and "DOCTOR WARN gitignore: missing: .env" in out
+          and "DOCTOR OK gitignore: covers" in out2 and "DOCTOR WARN kit-v2: missing: AGENTS.md" in out2, out + out2)
+    if shutil.which("git"):
+        sh(["git", "init", "-q"], cwd=G)
+        sh(["git", "config", "user.name", "Self Test"], cwd=G)
+        sh(["git", "config", "user.email", "selftest@example.invalid"], cwd=G)
+        rc, out = aw(G, "doctor")
+        check("doctor: a repository with user.name and user.email -> OK git-identity", "DOCTOR OK git-identity:" in out, out)
+    else:
+        skip("doctor: a repository with user.name and user.email -> OK git-identity", "no git on PATH")
+
+    # ---- audit: stale WORKLOG, the card's closed OWNS list, a ledger row edited in place
+    A = new_project(work, "gapaudit")
+    ap = A / ".hermes/plans"
+    aw(A, "gate", "baseline")
+    aw(A, "ratchet", "--raise", "3", "--i-am-architect")
+    put(A, ".hermes/plans/cards/T-050.md", LINT_CARD_ROTE)
+    aw(A, "integrity", "--write-baseline", "--i-am-architect")
+    t = time.time()
+    for f in (ap / "gate_output").glob("*.txt"):
+        os.utime(f, (t - 10000, t - 10000))
+    os.utime(ap / "WORKLOG.md", (t - 7200, t - 7200))
+    rc, out = aw(A, "audit")
+    os.utime(ap / "gate_output/baseline.txt", (t, t))
+    rc2, out2 = aw(A, "audit")
+    check("audit: a WORKLOG two hours older than a card's gate file -> WARN; the audit's own audit-*.txt never triggers it",
+          "WARN WORKLOG older" not in out and "WARN WORKLOG older than newest gate_output" in out2, out + out2)
+    aw(A, "start", "T-050")
+    put(A, "src/a.py", "x = 1\n")
+    rc, out = aw(A, "audit", "T-050", env={"OWNS": "src/a.py,src/b.py"})
+    check("RED: audit with an OWNS env wider than the card's closed list -> OWNS-DECLARED, AUDIT FAIL",
+          rc == 1 and "OWNS-DECLARED differs from the card: missing_from_env=[] not_in_card=['src/b.py']" in out
+          and out.strip().splitlines()[-1].startswith("AUDIT FAIL"), out)
+    aw(A, "start", "T-050")
+    rc, out = aw(A, "audit", "T-050", env={"OWNS": "src/a.py"})
+    led = ap / "AUDIT_LEDGER.md"
+    b = led.read_bytes()
+    led.write_bytes(b.replace(b"verdict=FAIL", b"verdict=PASS", 1))
+    aw(A, "start", "T-050")
+    rc2, out2 = aw(A, "audit", "T-050", env={"OWNS": "src/a.py"})
+    check("RED: one ledger verdict edited in place (same length, nothing cut) -> LEDGER-REWRITTEN, AUDIT FAIL; the audit before the edit passed",
+          rc == 0 and out.strip().splitlines()[-1].startswith("AUDIT PASS") and b.count(b"verdict=FAIL") == 1
+          and rc2 == 1 and "LEDGER LEDGER-REWRITTEN" in out2 and led.read_bytes().count(b"### RE-AUDIT") == b.count(b"### RE-AUDIT"), out + out2)
+
+    # ---- queue-check: OWNS overlap between cards (literal vs glob, glob vs glob, Depends)
+    def card(cid, owns, dep="-"):
+        return LINT_CARD_ROTE.replace("T-050", cid).replace("src/a.py", owns).replace("Depends: -", "Depends: " + dep)
+    put(A, ".hermes/plans/cards/T-051.md", card("T-051", "src/a*x.py"))
+    put(A, ".hermes/plans/cards/T-052.md", card("T-052", "src/k*z.py"))
+    put(A, ".hermes/plans/cards/T-053.md", card("T-053", "src/kb*.py"))
+    done = "QUEUE DONE 0 PASS / 0 FAIL / 0 STOP\n"
+    put(A, ".hermes/plans/cards/QUEUE_gap1.md", "# QUEUE\nChain: base=3 | T-050:+0 T-051:+0 T-052:+0 | final=3\n" + done)
+    put(A, ".hermes/plans/cards/QUEUE_gap2.md", "# QUEUE\nChain: base=3 | T-052:+0 T-053:+0 | final=3\n" + done)
+    rc1, o1 = aw(A, "queue-check", ".hermes/plans/cards/QUEUE_gap1.md")
+    rc2, o2 = aw(A, "queue-check", ".hermes/plans/cards/QUEUE_gap2.md")
+    put(A, ".hermes/plans/cards/T-053.md", card("T-053", "src/kb*.py", "T-052"))
+    rc3, o3 = aw(A, "queue-check", ".hermes/plans/cards/QUEUE_gap2.md")
+    check("queue-check: three cards with no common file (a literal next to a glob that only shares its prefix) -> OK",
+          rc1 == 0 and "QUEUE-CHECK OK chain=3 -> ... -> 3" in o1, o1)
+    check("RED: queue-check: two globs that can match one file (`src/k*z.py`, `src/kb*.py`) without Depends -> FAIL; with Depends -> OK",
+          rc2 == 1 and "T-053: OWNS 'src/kb*.py' overlaps earlier T-052" in o2 and rc3 == 0 and "QUEUE-CHECK OK" in o3, o2 + o3)
+
+    # ---- card-lint: rules whose condition could flip unnoticed
+    LG = new_project(work, "gaplint")
+    aw(LG, "ratchet", "--raise", "3", "--i-am-architect")
+
+    def lint(text, *flags):
+        put(LG, ".hermes/plans/cards/T-050.md", text)
+        return aw(LG, "card-lint", "T-050", *flags)
+    R = LINT_CARD_ROTE
+    noproof = R.replace("$ bash tools/gate.sh pre-T-050\nGATE OK count=3 min=3\n", "$ bash tools/gate.sh pre-T-050\nGATE OK\n")
+    assert noproof != R
+    for name, text, flags, want_rc, must, must_not in (
+        ("L40: the last GATE row does not expect AUDIT PASS", R.replace("re_audit.sh T-050` | `AUDIT PASS` |", "re_audit.sh T-050` | `ok 1` |"), (), 1,
+         "LINT ERROR L40 line 43: the LAST GATE row must be", None),
+        ("L17: STEPS rows numbered 1, 3", R.replace("| 2 | `python3 -c", "| 3 | `python3 -c"), (), 1, "table row # '3' should be 2", None),
+        ("L19: CHAIN says MEASURED, the DRY-RUN PROOF shows no count", noproof, (), 1, "LINT ERROR L19", None),
+        ("L19 stays silent when the same card says UNMEASURED", noproof.replace("(MEASURED)", "(UNMEASURED)"), (), None, "CARD-LINT", " L19 "),
+        ("L02: a two-letter title", R.replace("# T-050 - probe", "# T-050 - ab"), (), 1, "LINT ERROR L02 line 1: title too short", None),
+        ("L02 accepts a three-letter title", R.replace("# T-050 - probe", "# T-050 - abc"), (), 0, "CARD-LINT OK errors=0", "L02"),
+        ("L04: a T- card in the CENSUS lane", R.replace("Lane: ROTE", "Lane: CENSUS"), (), 1, "a T- card must use Lane: ROTE (got CENSUS)", None),
+        ("L01: a BOM", b"\xef\xbb\xbf" + R.encode("utf-8"), (), 1, "LINT ERROR L01 line 1: BOM at byte 0", None),
+        ("L16: AFTER raises the floor to another number (WARN; --strict fails on it)",
+         R.replace("Architect: re-baseline? no.", "Architect: ratchet --raise 9 after this card."), ("--strict",), 1, "LINT WARN L16 line 58: AFTER raises the floor", None),
+        ("L40: no OWNS= on the re_audit row (WARN)", R.replace("OWNS='src/a.py' bash tools/re_audit.sh", "bash tools/re_audit.sh"), (), 0,
+         "LINT WARN L40 line 43: no OWNS='...' on the re_audit row", None),
+    ):
+        rc, out = lint(text, *flags)
+        check("card-lint " + name, (want_rc is None or rc == want_rc) and must in out and (must_not is None or must_not not in out) and "Traceback" not in out, out)
+
+
+def section_gaps2(work: Path):
+    """Engine behaviour that survived a one-token mutation after 2.8.2 (second series): each check fails on a named mutant."""
+    print("\n-- gaps, second series: engine commands")
+    G = new_project(work, "gaps2")
+    plans = G / ".hermes/plans"
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    # ---- C1-01 the gate parses the count the suite printed on STDOUT (kills H31, aw.py:189)
+    put(G, "tests/out_only.py", 'print("Ran 3 tests")\n')
+    env0 = (G / "tools/kit.env").read_text(encoding="utf-8")
+    put(G, "tools/kit.env", "\n".join((f"TEST_CMD={sys.executable} -I -B tests/out_only.py" if ln.startswith("TEST_CMD=") else ln)
+                                     for ln in env0.split("\n")))
+    rc, out = aw(G, "gate", "stdout")
+    put(G, "tools/kit.env", env0)
+    check("gate reads the count from the suite's STDOUT (a mutant that keeps only stderr -> count=0 -> GATE FAIL)",
+          rc == 0 and "GATE OK count=3 min=0" in out, (rc, out))
+
+    # ---- C1-02 an invalid COUNT_REGEX in kit.env is a named refusal, not a Traceback (kills T27, H60; aw.py:71-72)
+    put(G, "tools/kit.env", "\n".join(("COUNT_REGEX=(" if ln.startswith("COUNT_REGEX=") else ln) for ln in env0.split("\n")))
+    rc, out = aw(G, "gate", "badrx")
+    put(G, "tools/kit.env", env0)
+    check("RED: an invalid COUNT_REGEX in kit.env -> exit 2 naming COUNT_REGEX, no Traceback, no gate file",
+          rc == 2 and "COUNT_REGEX is not a valid regex" in out and "Traceback" not in out
+          and not (plans / "gate_output/badrx.txt").exists(), (rc, out))
+
+    # ---- C1-03 a missing kit.env is a named refusal (kills H16, aw.py:64)
+    (G / "tools/kit.env").rename(G / "tools/kit.env.off")
+    rc, out = aw(G, "gate", "noenv")
+    (G / "tools/kit.env.off").rename(G / "tools/kit.env")
+    check("RED: a missing tools/kit.env -> exit 2 naming the file, no Traceback",
+          rc == 2 and "tools/kit.env missing" in out and "Traceback" not in out, (rc, out))
+
+    # ---- C1-04 six refusals keep their exit code and their word (kills T119, H61, H53, H35, H49, T43)
+    ra, oa = aw(G, "integrity", "--write-baseline")
+    rb, ob = aw(G, "audit", "T-001", "T-002")
+    rh, oh = aw(G, "gate", "--help")
+    rq, oq = aw(G, "queue-check", "nope.md")
+    put(G, "e_old.txt", "")
+    put(G, "e_new.txt", "x\n")
+    put(G, "src/p.txt", "a\n")
+    rp, op = aw(G, "patch", "src/p.txt", "e_old.txt", "e_new.txt")
+    rc_l, oc_l = aw(G, "card-lint", "T-999")
+    check("six refusals keep their exit code and their word: integrity --write-baseline -> 2 architect-only; audit with two ids -> 2 usage; "
+          "gate --help -> 0 usage; a missing queue file -> 1 not found, no Traceback; an empty patch OLD -> 1 REFUSED with the file untouched; "
+          "card-lint on a missing card -> 2 CARD-LINT ERROR naming plans/cards/T-999.md",
+          ra == 2 and "--write-baseline is architect-only" in oa
+          and rb == 2 and "usage: aw.py audit" in ob
+          and rh == 0 and "usage: aw.py" in oh
+          and rq == 1 and "queue-check: nope.md not found" in oq and "Traceback" not in oq
+          and rp == 1 and "PATCH REFUSED: OLD is empty" in op and (G / "src/p.txt").read_bytes() == b"a\n"
+          and rc_l == 2 and "CARD-LINT ERROR card not found:" in oc_l and "plans/cards/T-999.md" in oc_l.replace(os.sep, "/"),
+          (ra, oa, rb, ob, rh, oh, rq, oq, rp, op, rc_l, oc_l))
+
+    # ---- C1-05 RED: backup refuses a file outside the project and a missing file (kills H115, aw.py:487)
+    outside = work / "outside_gaps2.txt"
+    put(work, "outside_gaps2.txt", "x\n")
+    r1, o1 = aw(G, "backup", "T-070", str(outside))
+    r2, o2 = aw(G, "backup", "T-070", "src/missing.py")
+    check("RED: backup refuses a file outside the project and a missing file: exit 1, one message for both, no Traceback, no backups/T-070",
+          r1 == 1 and "backup: not a file inside the project" in o1 and "Traceback" not in o1
+          and r2 == 1 and "backup: not a file inside the project" in o2 and "Traceback" not in o2
+          and not (plans / "backups/T-070").exists(), (r1, o1, r2, o2))
+
+    # ---- C1-06 restore re-creates the directory a backed-up file lived in (kills H25, aw.py:518)
+    put(G, "deep/dir/x.py", "v1\n")
+    aw(G, "start", "T-071")
+    aw(G, "backup", "T-071", "deep/dir/x.py")
+    shutil.rmtree(G / "deep")
+    rc, out = aw(G, "restore", "T-071")
+    check("restore re-creates a removed directory: RESTORED 1, the file back with its bytes, no Traceback",
+          rc == 0 and (G / "deep/dir/x.py").read_bytes() == b"v1\n" and "Traceback" not in out, (rc, out))
+
+    # ---- C1-07 report: the newest QUEUE file, its Chain: line and the last five re-audits (kills H102, H91, H40, H6)
+    R = new_project(work, "gaps2rep")
+    rp = R / ".hermes/plans"
+    aw(R, "report")
+    rep0 = (rp / "REPORT_latest.md").read_text(encoding="utf-8")
+    put(R, ".hermes/plans/cards/QUEUE_a.md", "# QUEUE\nChain: base=3 | T-050:+0 T-051:+0 | final=3\n")
+    put(R, ".hermes/plans/cards/QUEUE_b.md", "# QUEUE\nno chain here\n")
+    t = time.time()
+    os.utime(rp / "cards/QUEUE_b.md", (t - 900, t - 900))
+    os.utime(rp / "cards/QUEUE_a.md", (t, t))
+    with (rp / "WORKLOG.md").open("a", encoding="utf-8", newline="\n") as f:
+        f.write("## T-050 | 2026-01-01T00:00:00 | PASS | gate=OK count=3\n")
+    with (rp / "AUDIT_LEDGER.md").open("a", encoding="utf-8", newline="\n") as f:
+        f.write("".join(f"### RE-AUDIT n{i}\n" for i in range(1, 7)))
+    aw(R, "report")
+    rep1 = (rp / "REPORT_latest.md").read_text(encoding="utf-8")
+    os.utime(rp / "cards/QUEUE_b.md", (t + 5, t + 5))
+    aw(R, "report")
+    rep2 = (rp / "REPORT_latest.md").read_text(encoding="utf-8")
+    check("report: no QUEUE file -> none; the newest QUEUE -> 'QUEUE_a.md 1/2 in WORKLOG, not done: T-051'; only the last five re-audits; "
+          "a queue without a Chain: line -> '(no Chain: line)'",
+          "queue: none (no .hermes/plans/cards/QUEUE*.md)" in rep0 and "## last re-audits\n(none)\n" in rep0
+          and "queue: QUEUE_a.md 1/2 in WORKLOG, not done: T-051" in rep1
+          and "### RE-AUDIT n1\n" not in rep1 and all(f"### RE-AUDIT n{i}\n" in rep1 for i in range(2, 7))
+          and "queue: QUEUE_b.md (no Chain: line)" in rep2, (rep0, rep1, rep2))
+
+    # ---- C1-08 doctor: the counts of its last line, ledger-s8, one FAIL (kills H22, H103, H109)
+    D = new_project(work, "gaps2doc")
+    dp = D / ".hermes/plans"
+
+    def counts(o):
+        """(WARN lines, FAIL lines, last line): the summary line is last and itself starts with 'DOCTOR FAIL' on a failing run."""
+        ls = o.strip().splitlines()
+        return (sum(1 for x in ls[:-1] if x.startswith("DOCTOR WARN ")),
+                sum(1 for x in ls[:-1] if x.startswith("DOCTOR FAIL ")), ls[-1])
+
+    rc1, out1 = aw(D, "doctor")
+    w1, f1, last1 = counts(out1)
+    led = dp / "AUDIT_LEDGER.md"
+    b = led.read_bytes()
+    put(D, ".hermes/plans/AUDIT_LEDGER.md", b + b"\n## 9. EXTRA\n")
+    rc2, out2 = aw(D, "doctor")
+    led.write_bytes(b)
+    (D / "tools/re_audit.sh").rename(D / "tools/re_audit.sh.off")
+    rc3, out3 = aw(D, "doctor")
+    aw(D, "report")
+    rep = (dp / "REPORT_latest.md").read_text(encoding="utf-8")
+    (D / "tools/re_audit.sh.off").rename(D / "tools/re_audit.sh")
+    w3, f3, last3 = counts(out3)
+    check("doctor: the last line counts its own WARN and FAIL lines; ledger-s8 OK, then WARN after a '## 9.' heading; "
+          "a missing tools/re_audit.sh -> exit 1, one FAIL line, and the report repeats warn/fail",
+          last1 == f"DOCTOR PASS warn={w1} fail=0" and w1 >= 1 and "DOCTOR OK ledger-s8:" in out1
+          and "DOCTOR WARN ledger-s8:" in out2
+          and rc3 == 1 and "DOCTOR FAIL kit-files: missing: tools/re_audit.sh" in out3 and f3 == 1
+          and last3 == f"DOCTOR FAIL warn={w3} fail=1"
+          and f"doctor: FAIL warn={w3} fail=1 (full: `aw.py doctor`)" in rep, (last1, out1, out2, last3, rep[-300:]))
+
+    # ---- C1-09 modules: one existing file under two same-wave globs (kills H71, aw.py:1109)
+    M = new_project(work, "gaps2mod")
+    head = "# MODULES\n| ID | Module | Purpose | OWNS | Depends | Wave | Gate | Decides | Status |\n|---|---|---|---|---|---|---|---|---|\n"
+    put(M, ".hermes/plans/MODULES.md", head + "| M-01 | core | the core | src/*.py | - | W-1 | gate | architect | TODO |\n"
+        "| M-02 | api | the api | src/a* | - | W-1 | gate | architect | TODO |\n")
+    put(M, "src/a.py", "x\n")
+    rc1, o1 = aw(M, "modules")
+    put(M, ".hermes/plans/MODULES.md", head + "| M-01 | core | the core | src/*.py | - | W-1 | gate | architect | TODO |\n"
+        "| M-02 | api | the api | lib/*.py | - | W-1 | gate | architect | TODO |\n")
+    put(M, "lib/b.py", "x\n")
+    rc2, o2 = aw(M, "modules")
+    check("modules: two same-wave globs that both match one existing file -> exit 1 'both own an existing file via'; "
+          "the same two globs disjoint -> MODULES OK modules=2 waves=1",
+          rc1 == 1 and "both own an existing file via" in o1 and rc2 == 0 and "MODULES OK modules=2 waves=1" in o2, (rc1, o1, rc2, o2))
+
+    # ---- C1-10 improve: exact counts and a four-column status update (kills H69, T60, aw.py:653-656)
+    I = new_project(work, "gaps2imp")
+    with (I / ".hermes/plans/ARCHITECT_FEEDBACK.md").open("a", encoding="utf-8", newline="\n") as f:
+        f.write("## 2026-01-01 | F-001 | skips red | OPEN\n## 2026-01-02 | F-002 | wrong count | IGNORED\n"
+                "## 2026-01-03 | F-003 | slow gate | APPLIED\n## 2026-01-04 | status F-001 | re-checked | APPLIED\n")
+    rc, out = aw(I, "improve")
+    check("improve: four-column rows count once each and a later 'status F-001' row moves that entry (OPEN=0 APPLIED=2 IGNORED=1); "
+          "only the IGNORED entry gets an action",
+          "IMPROVE feedback OPEN=0 APPLIED=2 IGNORED=1 AUTOMATED=0" in out
+          and "IMPROVE ACTION ignored-correction F-002 (wrong count)" in out and "open-correction" not in out, out)
+
+    # ---- C1-11 next-id skips non-.md files, templates and the guide (kills H67, T57, aw.py:581)
+    N = new_project(work, "gaps2ids")
+
+    def nid():
+        return aw(N, "next-id", "T")[1].strip().splitlines()[-1]
+
+    base = nid()
+    put(N, ".hermes/plans/cards/T-700.md", "# T-700 - probe\n")
+    n1 = nid()
+    (N / ".hermes/plans/cards/T-700.md").rename(N / ".hermes/plans/cards/T-700.md.off")
+    n2 = nid()
+    put(N, ".hermes/plans/cards/X.template.md", "# T-800 - example\n")
+    n3 = nid()
+    with (N / ".hermes/plans/GUIDE.md").open("a", encoding="utf-8", newline="\n") as f:
+        f.write("\n# T-900 - example\n")
+    n4 = nid()
+    check("next-id: a card title counts (T-701), while a renamed .off file, a *.template.md and a '# T-900' line in GUIDE.md count for nothing",
+          n1 == "T-701" and n2 == base and n3 == base and n4 == base, (base, n1, n2, n3, n4))
+
+    # ---- C1-12 audit without WORKLOG.md (kills H28, aw.py:456)
+    A = new_project(work, "gaps2aud")
+    ap = A / ".hermes/plans"
+    aw(A, "gate", "baseline")
+    (ap / "WORKLOG.md").rename(ap / "WORKLOG.md.off")
+    rc, out = aw(A, "audit")
+    (ap / "WORKLOG.md.off").rename(ap / "WORKLOG.md")
+    check("audit without WORKLOG.md: no Traceback and the last line is still a verdict",
+          "Traceback" not in out and out.strip().splitlines()[-1].startswith("AUDIT "), (rc, out))
+
+    # ---- C1-13 RED: a legacy task-start marker still reports a file outside OWNS (kills T19, T110, aw.py:375/383)
+    aw(A, "ratchet", "--raise", "3", "--i-am-architect")
+    put(A, ".hermes/plans/cards/T-050.md", LINT_CARD_ROTE)
+    aw(A, "integrity", "--write-baseline", "--i-am-architect")
+    aw(A, "start", "T-050")
+    rec = json.loads((A / ".aw/task-start").read_text(encoding="utf-8"))
+    rec.update(version=1, files={}, t0=time.time())
+    put(A, ".aw/task-start", json.dumps(rec))
+    time.sleep(0.05)
+    put(A, "src/a.py", "x = 1\n")
+    put(A, "src/zz_out.py", "x\n")
+    rc, out = aw(A, "audit", "T-050", env={"OWNS": "src/a.py"})
+    check("RED: a legacy v1 task-start marker still reports the file outside OWNS: exit 1, 'OWNS 1 outside OWNS', 'OUT src/zz_out.py'",
+          rc == 1 and "OWNS 1 outside OWNS" in out and "OUT src/zz_out.py" in out, (rc, out))
+
+
+def section_gaps3(work: Path):
+    """OWNS overlap and card parsing that survived a one-token mutation after 2.8.2 (second series)."""
+    print("\n-- gaps, second series: queue-check overlap and card-lint")
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    # ---- queue-check: _overlap, in both card orders
+    Q = new_project(work, "gaps3q")
+    aw(Q, "gate", "baseline")
+    aw(Q, "ratchet", "--raise", "3", "--i-am-architect")
+    aw(Q, "integrity", "--write-baseline", "--i-am-architect")
+    for cid, owns in (("T-061", "src/a*.py"), ("T-062", "src/k*.py"), ("T-063", "src/k*x.py"), ("T-064", "src/kb*.py"), ("T-065", "src/k*a*z.py")):
+        put(Q, f".hermes/plans/cards/{cid}.md", LINT_CARD_ROTE.replace("T-050", cid).replace("src/a.py", owns))
+
+    def queue(name, a, b):
+        put(Q, f".hermes/plans/cards/{name}.md", f"# QUEUE\nChain: base=3 | {a}:+0 {b}:+0 | final=3\nQUEUE DONE 0 PASS / 0 FAIL / 0 STOP\n")
+        return aw(Q, "queue-check", f".hermes/plans/cards/{name}.md")
+    rc, out = queue("QUEUE_g1", "T-061", "T-062")
+    check("queue-check: two globs with different literal prefixes and the same tail (`src/a*.py`, `src/k*.py`) share no file -> OK",
+          rc == 0 and "QUEUE-CHECK OK" in out, out)
+    rc1, o1 = queue("QUEUE_g2", "T-063", "T-064")
+    rc2, o2 = queue("QUEUE_g3", "T-064", "T-063")
+    check("RED: queue-check: `src/k*x.py` and `src/kb*.py` can match one file -> FAIL in either card order",
+          rc1 == 1 and "T-064: OWNS 'src/kb*.py' overlaps earlier T-063" in o1 and rc2 == 1 and "T-063: OWNS 'src/k*x.py' overlaps earlier T-064" in o2, o1 + o2)
+    rc1, o1 = queue("QUEUE_g4", "T-065", "T-064")
+    rc2, o2 = queue("QUEUE_g5", "T-064", "T-065")
+    check("RED: queue-check: a glob with two wildcards (`src/k*a*z.py`) against `src/kb*.py` -> FAIL in either card order",
+          rc1 == 1 and "T-064: OWNS 'src/kb*.py' overlaps earlier T-065" in o1 and rc2 == 1 and "T-065: OWNS 'src/k*a*z.py' overlaps earlier T-064" in o2, o1 + o2)
+
+    # ---- card-lint: fence borders, exempt sections, which lines are commands, the line a finding names
+    LG = new_project(work, "gaps3lint")
+    aw(LG, "ratchet", "--raise", "3", "--i-am-architect")
+
+    def lint(text):
+        put(LG, ".hermes/plans/cards/T-050.md", text)
+        return aw(LG, "card-lint", "T-050")
+    R = LINT_CARD_ROTE
+    P2 = "python3 -I -B tools/aw.py patch src/a.py old.txt"
+    OK = "CARD-LINT OK errors=0"
+    rows = (
+        ("L14: CHAIN arithmetic is reported at the CHAIN line itself",
+         "CHAIN: ran=3 +0 -> ran=3 (MEASURED)", "CHAIN: ran=3 +1 -> ran=3 (MEASURED)", 1, "LINT ERROR L14 line 39: CHAIN arithmetic: 3+1 != 3", None),
+        ("L06: a placeholder on the line after an EMPTY fenced block is outside the fence",
+         "## OWNS\n", "```text\n```\nTODO fill this\n\n## OWNS\n", 1, "LINT ERROR L06 line 9: placeholder 'TODO' left in", None),
+        ("a placeholder inside the SECOND of two adjacent fenced blocks stays inside a fence",
+         "## OWNS\n", "```text\nfirst\n```\n```text\nTODO inside a block\n```\n\n## OWNS\n", 0, OK, " L06 "),
+        ("a `## GATE` line inside a heredoc body is not a section heading",
+         "x = 1\nEOF\n", "x = 1\n## GATE\nEOF\n", 0, OK, None),
+        ("L06 skips prose inside DRY-RUN PROOF",
+         "## DRY-RUN PROOF\n", "## DRY-RUN PROOF\nTODO was printed by the tool and is kept verbatim\n", 0, OK, " L06 "),
+        ("L16 skips a fenced line outside DRY-RUN PROOF",
+         "x = 1\nEOF\n", "x = 1  # min=9\nEOF\n", 0, OK, " L16 "),
+        ("L12: a two-argument `aw.py patch` in a STEPS shell block is a command",
+         "cat > src/a.py <<'EOF'\n", P2 + "\ncat > src/a.py <<'EOF'\n", 1, "LINT ERROR L12 line 30: aw.py patch needs exactly 3 args", None),
+        ("the same line as a comment in that shell block is not a command",
+         "cat > src/a.py <<'EOF'\n", "# " + P2 + "\ncat > src/a.py <<'EOF'\n", 0, OK, " L12 "),
+        ("the same command quoted in a ```text block of BACKUP is not a command",
+         "NEW: src/a.py\n", "NEW: src/a.py\n\n```text\nexample only: `" + P2 + "`\n```\n", 0, OK, " L12 "),
+        ("the same command in a shell block of GOAL (not a command section) is not a command",
+         "## OWNS\n", "```bash\n" + P2 + "\n```\n\n## OWNS\n", 0, OK, " L12 "),
+        ("L15 names the PRE-FLIGHT count, not the floor",
+         "| `GATE OK count=3 min=3` |\n| 2 | `python3 -I -B tools/aw.py integrity`", "| `GATE OK count=4 min=3` |\n| 2 | `python3 -I -B tools/aw.py integrity`",
+         1, "PRE-FLIGHT count=4 != CHAIN ran=3", None),
+    )
+    for name, old, new, want_rc, must, must_not in rows:
+        assert R.count(old) == 1, old
+        rc, out = lint(R.replace(old, new))
+        check("card-lint " + name, rc == want_rc and must in out and (must_not is None or must_not not in out) and "Traceback" not in out, out)
+
+
+def section_gaps_mod1(work: Path):
+    """Behaviour that a one-token change of effort.py, init_project.py or setup_project.py could alter with the suite still green.
+    Replays the survivors of wk/D1_effort.jsonl (29), wk/D1_init.jsonl (25) and wk/D1_setup.jsonl (19); every check names the rows it kills."""
+    print("\n-- gaps, third series: effort.py, init_project.py, setup_project.py")
+    py = sys.executable
+    INIT = str(KIT / "init_project.py")
+    SETUP = str(KIT / "setup_project.py")
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def ini(*a):
+        return sh([py, "-B", INIT, *a], cwd=work)
+
+    # ================= effort.py =================
+    EF = new_project(work, "effmod")
+    (EF / ".hermes/plans/cards").mkdir(parents=True, exist_ok=True)
+    env0 = (EF / "tools/kit.env").read_text(encoding="utf-8")
+    auto = env0.replace("EFFORT_WORKER=ultra", "EFFORT_WORKER=auto")
+    put(EF, "tools/kit.env", auto)
+
+    def eff(*a):
+        return sh([py, "-I", "-B", "tools/effort.py", *a], cwd=EF)
+
+    # kills effort.py:91 rows 4 (or->and in the docstring fallback), 62 (return 2), 109 (split(...)[1])
+    rc, out = eff()
+    check("effort.py with no arguments -> exit 2, the docstring's FIRST line and the usage line (a mutant that prints an empty first line, the second docstring line, or exits 3 fails)",
+          rc == 2 and out.splitlines()[0].startswith("effort.py - which reasoning effort") and "usage: effort.py stage|card ID|queue" in out
+          and "Traceback" not in out, out)
+
+    # kills effort.py:79 row 46 (cmd == "card" and arg -> or)
+    rc, out = eff("card")
+    check("effort.py `card` without an id -> the usage line and exit 2, not a W0 line judged for the empty id", rc == 2 and "usage: effort.py" in out, out)
+
+    MIN = ("# T-100 - minimal card\nStatus: TODO | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none\n\n"
+           "## GOAL\nx\n\n## OWNS\n- src/a.py\n\n## READ-ONLY\n- nothing else\n\n## STEPS\n| # | Command | Expected |\n|---|---|---|\n| 1 | `echo 1` | `1` |\n")
+    put(EF, ".hermes/plans/cards/T-100.md", MIN)
+    # kills effort.py:42 row 35 (steps += 2), :43 rows 11 (owns += 2) and 105 (and -> or), :33 row 56 (fb = 1)
+    rc, out = eff("card", "T-100")
+    check("effort.py card under EFFORT_WORKER=auto: one STEPS row, one OWNS line, no fence -> W4 medium with steps=1 fenced=0B owns=1 (a doubled STEP/OWNS counter, an OWNS count that also takes '-' lines of other sections, or fb starting at 1 changes the line)",
+          rc == 0 and out.strip() == "EFFORT medium worker W4 T-100 ROTE within size (steps=1 fenced=0B owns=1)", out)
+
+    # kills effort.py:49 row 16 (group(1) -> group(2): the E1 line names the card, not FAIL)
+    put(EF, ".hermes/plans/WORKLOG.md", "\n## T-100 | 2026-11-08T10:00:00+0200 | FAIL | probe\nfiles: none\nfor author/architect: Q-001 Q-002\n")
+    put(EF, ".hermes/plans/QUESTIONS.md", "ANSWER Q-001 2026-11-08 fixed\n")
+    rc1, o1 = eff("stage")
+    put(EF, ".hermes/plans/QUESTIONS.md", "ANSWER Q-001 2026-11-08 fixed\nANSWER Q-002 2026-11-08 also\n")
+    rc2, o2 = eff("stage")
+    check("effort.py stage: newest WORKLOG entry is a FAIL with two questions and one ANSWER -> E1 ultra naming that card (T-100); with both answered -> E4 medium at the default level",
+          rc1 == 0 and o1.strip().startswith("EFFORT ultra architect E1 ") and "(T-100)" in o1
+          and rc2 == 0 and o2.strip().startswith("EFFORT medium architect E4 "), (o1, o2))
+
+    rc, out = eff("card", "T-999")
+    check("effort.py card on an id that has no file -> W0 at the DEFAULT level and `card T-999 not found or empty` (the queue checks below judge such cards)",
+          rc == 0 and out.strip() == "EFFORT medium worker W0 card T-999 not found or empty", out)
+
+    FA = ("# T-101 - fence closed by a fence of the same char and length\nStatus: TODO | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none\n\n"
+          "## OWNS\n- src/a.py\n\n## STEPS\n| 1 | `echo a` | `a` |\n```bash\necho 1\necho 22\n```\n| 2 | `echo b` | `b` |\n")
+    put(EF, ".hermes/plans/cards/T-101.md", FA)
+    # kills effort.py:38 rows 21 (== -> !=) and 24 (>= -> <): a block closed by an equal fence must close, or the rest becomes fenced bytes
+    rc, out = eff("card", "T-101")
+    check("effort.py facts: a ``` block inside STEPS closed by an equal fence -> both STEPS rows count and the block is 15 fenced bytes (a mutant that never closes an equal fence, or needs a longer one, keeps the following row fenced: steps=1 fenced=... instead of steps=2 fenced=15B)",
+          rc == 0 and out.strip() == "EFFORT medium worker W4 T-101 ROTE within size (steps=2 fenced=15B owns=1)", out)
+
+    FB = ("# T-102 - a tilde fence line inside a backtick block\nStatus: TODO | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none\n\n"
+          "## OWNS\n- src/a.py\n\n## STEPS\n```bash\necho 1\n~~~\n| 1 | `x` | `1` |\n```\n")
+    put(EF, ".hermes/plans/cards/T-102.md", FB)
+    # kills effort.py:38 rows 20 (and -> or), 42 (== -> !=) and 50 (and -> or): a ~~~ line inside a ``` block must NOT close it
+    rc, out = eff("card", "T-102")
+    check("effort.py facts: a ~~~ line inside a ``` block does not close it -> the STEPS row after it stays fenced (steps=0 fenced=25B); a mutant that closes on a fence of another char, or on any long-enough fence line, turns it into a STEPS row",
+          rc == 0 and out.strip() == "EFFORT medium worker W4 T-102 ROTE within size (steps=0 fenced=25B owns=1)", out)
+
+    FC = ("# T-103 - fenced bytes in DRY-RUN PROOF do not count\nStatus: TODO | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none\n\n"
+          "## OWNS\n- src/a.py\n\n## STEPS\n```bash\necho 1\n```\n\n## DRY-RUN PROOF\n```\n" + "z" * 60 + "\n```\n")
+    put(EF, ".hermes/plans/cards/T-103.md", FC)
+    # kills effort.py:40 row 37 (len(ln) + 1 -> + 2): only the STEPS fence counts, one line of 7 bytes, the 61-byte DRY-RUN line adds nothing
+    rc, out = eff("card", "T-103")
+    check("effort.py facts: fenced bytes outside DRY-RUN PROOF count as len(line)+1 (a one-line STEPS fence -> fenced=7B) and a 61-byte DRY-RUN PROOF fence adds nothing",
+          rc == 0 and out.strip() == "EFFORT medium worker W4 T-103 ROTE within size (steps=0 fenced=7B owns=1)", out)
+
+    FD = "# T-104 - ten STEPS rows\nStatus: TODO | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none\n\n## OWNS\n- src/a.py\n\n## STEPS\n| # | C | E |\n|---|---|---|\n" + "".join(f"| {i} | `e` | `{i}` |\n" for i in range(1, 11))
+    put(EF, ".hermes/plans/cards/T-104.md", FD)
+    # kills effort.py:65 row 92 (steps >= 10 -> 11)
+    rc, out = eff("card", "T-104")
+    check("effort.py card: exactly 10 STEPS rows and nothing else -> W3 ultra, 'steps=10 fenced=0B owns=1' (the >= 10 boundary; 11 would leave it a W4)",
+          rc == 0 and out.strip() == "EFFORT ultra worker W3 T-104 is large (steps=10 fenced=0B owns=1): split it, else run it hard", out)
+
+    FE = "# T-105 - exactly 4000 fenced bytes\nStatus: TODO | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none\n\n## OWNS\n- src/a.py\n\n## STEPS\n```\n" + "abcdefghi\n" * 400 + "```\n"
+    put(EF, ".hermes/plans/cards/T-105.md", FE)
+    # kills effort.py:65 row 65 (fb >= 4000 -> 4001)
+    rc, out = eff("card", "T-105")
+    check("effort.py card: a STEPS fence of exactly 4000 bytes (400 lines of 9 chars) -> W3 ultra, 'fenced=4000B' (the >= 4000 boundary; 4001 would leave it a W4)",
+          rc == 0 and out.strip() == "EFFORT ultra worker W3 T-105 is large (steps=0 fenced=4000B owns=1): split it, else run it hard", out)
+
+    QUEUE = ("# QUEUE 2026-11-08\nChain: base=3 | T-100:+0 T-101:+0 | final=3\n\n## START BLOCK (paste once)\n"
+             "```\nROLE: x\nLast line: QUEUE DONE\n```\nReturn line.\n")
+    put(EF, ".hermes/plans/cards/QUEUE_2026-11-08.md", QUEUE)
+    # kills effort.py:87 rows 32 (return 3), 33 (or -> and: a Traceback instead) and 82 (the ternary loses its `not`: the wrong message)
+    rc, out = eff("block")
+    check("effort.py `block` without --out on a queue that HAS a START BLOCK -> exit 3 and exactly 'block needs --out FILE' (a mutant returns 4, crashes on the None --out, or reports 'has no START BLOCK')",
+          rc == 3 and out.strip() == "EFFORT none - block needs --out FILE", out)
+
+    # kills effort.py:82 rows 74 (or -> and: 'no Chain: line' instead) and 80 (return 3 -> 4)
+    rc, out = eff("queue", "nope.md")
+    check("effort.py queue on a file that does not exist -> exit 3 and 'no queue file' (a mutant falls through to the 'no Chain: line' branch, or returns 4)",
+          rc == 3 and "no queue file" in out and "no Chain: line" not in out, out)
+
+    put(EF, ".hermes/plans/WORKLOG.md", "\n## T-100 | 2026-11-08T10:00:00+0200 | PASS | p\n## T-101 | 2026-11-08T10:00:00+0200 | PASS | p\n")
+    # kills effort.py:90 row 34 (todo or ids -> todo and ids: an empty list and an IndexError)
+    rc, out = eff("queue", ".hermes/plans/cards/QUEUE_2026-11-08.md")
+    check("effort.py queue with an explicit file whose cards all have a WORKLOG entry -> exit 0 and the full line for the hardest of the ids (a mutant with `todo and ids` indexes an empty list)",
+          rc == 0 and out.strip().startswith("EFFORT medium worker W4 queue QUEUE_2026-11-08.md, 2 card(s), hardest T-100: "), out)
+
+    # kills effort.py:27 row 78 (and -> or: a blank line raises ValueError) and row 94 (split maxsplit 1 -> 2: a value holding '=' raises)
+    put(EF, "tools/kit.env", auto.replace("TIMEOUT_S=900", "TIMEOUT_S=900\n\nNOTE=a=b"))
+    rck1, ok1 = eff("stage")
+    put(EF, "tools/kit.env", auto.replace("TIMEOUT_S=900", "TIMEOUT_S=900\n# note=1\n\n"))
+    rck2, ok2 = eff("stage")
+    put(EF, "tools/kit.env", auto)
+    check("effort.py reads tools/kit.env line by line: 'KEY=a=b' keeps its '=', a blank line and a '#comment=1' line are skipped -> E4 medium twice and no Traceback (the unpacking mutants die here)",
+          rck1 == 0 and rck2 == 0 and ok1.strip().startswith("EFFORT medium architect E4") and ok2.strip().startswith("EFFORT medium architect E4")
+          and "Traceback" not in ok1 + ok2, (ok1, ok2))
+
+    # ================= init_project.py =================
+    # kills init_project.py:136 row 0 (return 2 -> 3)
+    rc, out = ini()
+    check("init_project.py with no target -> usage, a FIX line and exit 2 (a mutant returns 3)", rc == 2 and "FIX:" in out and "usage:" in out, out)
+
+    notdir = work / "not_a_directory.txt"
+    notdir.write_text("x\n", encoding="utf-8")
+    # kills init_project.py:131 row 8 (return 2 -> 3)
+    rc, out = ini("--check", str(notdir))
+    check("init_project.py --check on a path that is not a directory -> exit 2 naming it (a mutant returns 3)", rc == 2 and "is not a directory" in out, out)
+
+    # kills init_project.py:143 rows 23 (or -> and), 27 (80 -> 81), 28 (chr(13) -> chr(14)), 46 (chr(10) -> chr(11)), 48 (or -> and) and :145 row 54 (return 2 -> 3)
+    r81, o81 = ini(str(work / "refuse_81"), "--name", "a" * 81)
+    rnl, onl = ini(str(work / "refuse_nl"), "--owner", "a" + chr(10) + "b")
+    rcr, ocr = ini(str(work / "refuse_cr"), "--owner", "a" + chr(13) + "b")
+    check("init_project.py refuses --name of 81 chars, --owner holding LF and --owner holding CR -> exit 2 and REFUSED: for each, and writes nothing (mutants that miss the length, the LF or the CR test install instead)",
+          r81 == 2 and rnl == 2 and rcr == 2 and all("REFUSED:" in o for o in (o81, onl, ocr))
+          and not (work / "refuse_81").exists() and not (work / "refuse_nl").exists() and not (work / "refuse_cr").exists(), (o81, onl, ocr))
+
+    # kills init_project.py:147 row 30 (parents=True -> False: the two missing parents) and 143 row 27 at its 80-char boundary
+    rc, out = ini(str(work / "deep/nest/proj"), "--name", "a" * 80)
+    check("init_project.py installs into a target whose two parent dirs do not exist (mkdir parents=True) and accepts a name of exactly 80 chars -> exit 0",
+          rc == 0 and "INSTALLED into" in out and (work / "deep/nest/proj/tools/aw.py").is_file(), out)
+
+    Q = work / "initcheck"
+    rcq, oq = ini(str(Q), "--lang", "en")
+    # kills init_project.py:148 row 9 (the `not` on the docs dir: a WARN on every install) and :105 row 35 (== -> != in the pick comprehension: 'matches docs/GUIDE.bg.md')
+    rc1, c1 = ini("--check", str(Q))
+    check("init_project.py install of a kit that HAS docs/GUIDE -> no 'WARN docs/' line, and --check on it -> exit 0, engine_diff=0 missing=0 and 'STATE .hermes/plans/GUIDE.md (edited after install)' (the installed guide is rendered, so it matches no raw guide)",
+          rcq == 0 and "WARN docs/" not in oq and "INSTALLED into" in oq and rc1 == 0 and "engine_diff=0 missing=0" in c1
+          and "(edited after install)" in c1 and "matches docs/GUIDE" not in c1, (oq[-200:], c1[-300:]))
+
+    put(Q, ".hermes/plans/GUIDE.md", (KIT / "docs/GUIDE.en.md").read_bytes())
+    # kills init_project.py:106 row 12 (pick[0] -> pick[1]: an IndexError when only one guide matches)
+    rc2, c2 = ini("--check", str(Q))
+    check("init_project.py --check on a project whose GUIDE.md is byte-identical to docs/GUIDE.en.md -> exit 0 and '(matches docs/GUIDE.en.md)' (a mutant indexes pick[1] and dies, or reports the bg guide)",
+          rc2 == 0 and "(matches docs/GUIDE.en.md)" in c2, c2[-300:])
+
+    n1 = int(c1.split("engine_same=")[1].split()[0]) if "engine_same=" in c1 else -1
+    put(Q, "tools/aw.py", (Q / "tools/aw.py").read_bytes() + b"\n# drift\n")
+    # kills init_project.py:95 row 34 (ok = == -> !=) and :97 row 17 (same += 2) and :100 row 50 (diff += 2)
+    rc3, c3 = ini("--check", str(Q))
+    n2 = int(c3.split("engine_same=")[1].split()[0]) if "engine_same=" in c3 else -2
+    check("init_project.py --check after ONE engine file was changed: exit 1, 'DIFF tools/aw.py', engine_diff=1 and engine_same drops by exactly 1 (mutants that flip the comparison or double a counter change one of those numbers)",
+          rc3 == 1 and "DIFF tools/aw.py" in c3 and "engine_diff=1" in c3 and n1 > 0 and n1 - n2 == 1, (n1, n2, c3[-200:]))
+
+    (Q / "tools/effort.py").rename(Q / "tools/effort.py.off")
+    (Q / "tools/kit.env").rename(Q / "tools/kit.env.off")
+    # kills init_project.py:88 row 43 (missing += 2) and :84 row 15 (missing += 2 for a STATE file)
+    rc4, c4 = ini("--check", str(Q))
+    check("init_project.py --check with one ENGINE file and one STATE file gone -> exit 1, 'MISSING tools/effort.py', 'MISSING tools/kit.env' and missing=2 (a doubled counter says 3)",
+          rc4 == 1 and "MISSING tools/effort.py" in c4 and "MISSING tools/kit.env" in c4 and "missing=2" in c4, c4[-300:])
+
+    G = work / "guideproj"
+    (G / ".hermes/plans").mkdir(parents=True, exist_ok=True)
+    # kills init_project.py:180 row 52 (gdst.parent.mkdir exist_ok=True -> False: FileExistsError on the existing .hermes/plans)
+    rg1, og1 = ini(str(G), "--lang", "en")
+    gd = G / ".hermes/plans/GUIDE.md"
+    check("init_project.py into a target that already has .hermes/plans and no GUIDE.md -> exit 0 and the guide written (mkdir with exist_ok=True; False raises FileExistsError)",
+          rg1 == 0 and gd.is_file() and "INSTALLED into" in og1, (rg1, og1[-200:]))
+
+    put(G, ".hermes/plans/GUIDE.md", gd.read_bytes() + b"\nEDITED-1\n")
+    (G / "kit_stage/.hermes").mkdir(parents=True, exist_ok=True)
+    # kills init_project.py:183 row 20 (!= -> ==: no staging at all), :187 row 41 (parents=True -> False: the missing 'plans' level) and :186 row 53 (dropping `not` skips the write)
+    rg2, og2 = ini(str(G), "--lang", "en")
+    kd = G / "kit_stage/.hermes/plans/GUIDE.md"
+    check("init_project.py with an edited GUIDE.md -> a COLLISION line for .hermes/plans/GUIDE.md and the staged copy written under kit_stage/ where .hermes/ exists and plans/ does not (mutants skip the staging, fail on the missing level or never write the file)",
+          rg2 == 0 and "COLLISION (merge by hand, backup first): .hermes/plans/GUIDE.md" in og2 and kd.is_file(), (rg2, og2[-300:]))
+
+    kd.rename(G / "kit_stage/.hermes/plans/GUIDE.md.off")
+    put(G, ".hermes/plans/GUIDE.md", gd.read_bytes() + b"\nEDITED-2\n")
+    # kills init_project.py:187 row 10 (kd.parent.mkdir exist_ok True -> False: FileExistsError on the plans/ dir that is still there)
+    rg3, og3 = ini(str(G), "--lang", "en")
+    check("init_project.py when only kit_stage/.hermes/plans/GUIDE.md is gone and its directory is still there -> exit 0 and the file written again (mkdir exist_ok=True; False raises FileExistsError)",
+          rg3 == 0 and kd.is_file(), (rg3, og3[-200:]))
+
+    # ================= setup_project.py =================
+    cfg = work / "gitconfig"
+    cfg.write_text("[user]\n\tname = Test\n\temail = t@e.invalid\n", encoding="utf-8", newline="")
+    senv = {"GIT_CONFIG_GLOBAL": str(cfg)}
+
+    def setup(name, *extra):
+        d = work / name
+        d.mkdir(parents=True, exist_ok=True)
+        return d, sh([py, "-B", SETUP, str(d), *extra], cwd=d, env=senv)
+
+    # kills setup_project.py:12 rows 6 and 29 (the name argument), :27 row 2 (owner falls back to USERNAME), :24 row 3 (text=False: OWNER=b'Test'),
+    #   :86 rows 4, 25, 26 ('git init: False'), :91 row 0 (the last line of the gate output), :94 row 7 (the second-to-last doctor line), :44 row 12 (init's second line)
+    S1, (rcs, os1) = setup("setup_one", "plain_name")
+    check("setup_project.py fresh install -> exit 0, 'PROJECT=plain_name  OWNER=Test', init's INSTALLED line, 'git init: True', 'GATE -> GATE OK count=', the LAST doctor line ('DOCTOR PASS', not the ratchet line above it) and the DONE banner",
+          rcs == 0 and "PROJECT=plain_name  OWNER=Test  " in os1 and "INSTALLED into" in os1 and "git init: True" in os1
+          and "GATE -> GATE OK count=" in os1 and "DOCTOR PASS warn=" in os1 and "DOCTOR OK ratchet:" not in os1
+          and "DONE. plain_name is ready." in os1, (rcs, os1[-400:]))
+
+    # kills setup_project.py:61 row 9 (dropping `not`: no IDEA.md at all), :85 row 16 (no git init), :83 row 19 (no .gitignore)
+    idea = S1 / "IDEA.md"
+    idea0 = idea.read_bytes() if idea.is_file() else b""
+    env1 = (S1 / "tools/kit.env").read_bytes()
+    check("setup_project.py fresh install writes IDEA.md with its template, tests/test_smoke.py, a .gitignore covering .env and a git repo",
+          idea.is_file() and "write here, in your own words" in idea.read_text(encoding="utf-8") and (S1 / "tests/test_smoke.py").is_file()
+          and (S1 / ".gitignore").is_file() and ".env" in (S1 / ".gitignore").read_text(encoding="utf-8") and (S1 / ".git").is_dir(), (idea0[:60],))
+
+    # kills setup_project.py:41 row 1 (sys.exit(0) -> 1) and :40 row 21 (doctor[1] -> doctor[2]: IndexError)
+    _, (rcs2, os2) = setup("setup_one", "plain_name")
+    check("setup_project.py on an already-installed project -> exit 0, ALREADY INSTALLED plus the whole doctor output, and IDEA.md and tools/kit.env untouched (mutants exit 1 or raise IndexError)",
+          rcs2 == 0 and "ALREADY INSTALLED" in os2 and "DOCTOR PASS warn=" in os2 and idea.read_bytes() == idea0
+          and (S1 / "tools/kit.env").read_bytes() == env1, (rcs2, os2[-300:]))
+
+    (work / "setup_tests/tests").mkdir(parents=True, exist_ok=True)
+    # kills setup_project.py:54 row 28 (mkdir exist_ok=True -> False: FileExistsError on the tests dir the owner already has)
+    _, (rcs3, os3) = setup("setup_tests")
+    check("setup_project.py on a target that already has a tests/ dir -> exit 0 and DONE (mkdir exist_ok=True; False raises FileExistsError)",
+          rcs3 == 0 and "DONE." in os3 and "Traceback" not in os3, (rcs3, os3[-300:]))
+
+
+def section_gaps_mod2(work: Path):
+    """Behaviour that a one-token change of learn.py, findings_lint.py, review_pack.py or worker_report.py could alter with the suite still green.
+    Replays the survivors of wk/D2_learn.jsonl (45), wk/D2_findings.jsonl, wk/D2_review.jsonl and wk/D2_report.jsonl; every check names the rows it kills."""
+    print("\n-- gaps, second series: learn.py, findings_lint.py, review_pack.py, worker_report.py")
+    py = sys.executable
+    LRN = str(KIT / "payload/tools/learn.py")
+    FL = str(KIT / "payload/tools/findings_lint.py")
+    RP = str(KIT / "payload/tools/review_pack.py")
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def fx(name):
+        d = work / name
+        (d / ".hermes/plans").mkdir(parents=True, exist_ok=True)
+        return d
+
+    def lrn(d, *more):
+        return sh([py, "-I", "-B", LRN, str(d), *more], cwd=work)
+
+    def last(out):
+        return out.replace(os.sep, "/").strip().splitlines()[-1] if out.strip() else ""
+
+    # ================= learn.py: repeated feedback (the AUTOMATED guard window) =================
+    f = fx("d2_fb_above")
+    put(f, ".hermes/plans/ARCHITECT_FEEDBACK.md",
+        "AUTOMATED by the check runner\n## 2026-11-03 | F-001 | skips RED | OPEN\n- Seen: x\n## 2026-11-04 | F-002 | Skips RED | APPLIED\n")
+    rc, out = lrn(f)
+    # kills learn.py:170 rows 3 (window start -1 -> -2), 75 (the cited line becomes v[1]) and 88 (enumerate start 1 -> 2 shifts the window)
+    check("learn.py: AUTOMATED on the line ABOVE the first repeated heading does not suppress it -> repeated-feedback citing ARCHITECT_FEEDBACK.md:2 and LEARN SUGGEST 1 (a window one line wider, or one read from the second entry, stays silent)",
+          rc == 0 and last(out) == "LEARN SUGGEST 1" and "repeated-feedback | 'skips red' x2, ARCHITECT_FEEDBACK.md:2" in out
+          and "unstable-card" not in out and "Traceback" not in out, out)
+
+    a = fx("d2_fb_once")
+    put(a, ".hermes/plans/ARCHITECT_FEEDBACK.md", "## 2026-11-03 | F-001 | lonely topic | OPEN\n")
+    rc_a, o_a = lrn(a)
+    b = fx("d2_fb_head")
+    put(b, ".hermes/plans/ARCHITECT_FEEDBACK.md", "## 2026-11-03 | F-001 | apply AUTOMATED check | OPEN\n## 2026-11-04 | F-002 | apply AUTOMATED check | APPLIED\n")
+    rc_b, o_b = lrn(b)
+    c = fx("d2_fb_next")
+    put(c, ".hermes/plans/ARCHITECT_FEEDBACK.md", "## 2026-11-03 | F-001 | same topic | OPEN\n- Seen: AUTOMATED by the check\n## 2026-11-04 | F-002 | same topic | APPLIED\n")
+    rc_c, o_c = lrn(c)
+    # kills learn.py:170 rows 70 (len(v) >= 2 and -> or: one entry fires), 88 (window starts below the heading) and 75, 85 (window read from the second entry)
+    check("learn.py: repeated-feedback needs TWO entries with the same topic (one heading is silent) and an AUTOMATED word on the heading or the line after the first one suppresses it (a wider or shifted window fires, or fires on a single entry)",
+          rc_a == 0 and rc_b == 0 and rc_c == 0 and "repeated-feedback" not in o_a + o_b + o_c and "Traceback" not in o_a + o_b + o_c, o_a + o_b + o_c)
+
+    d = fx("d2_fb_after")
+    put(d, ".hermes/plans/ARCHITECT_FEEDBACK.md", "## 2026-11-03 | F-001 | same topic | OPEN\n- Seen: x\nAUTOMATED by the check\n## 2026-11-04 | F-002 | same topic | APPLIED\n")
+    rc, out = lrn(d)
+    # kills learn.py:170 rows 95 (the window end takes v[1]) and 99 (end +1 -> +2): AUTOMATED two lines below the heading is outside the guard
+    check("learn.py: the AUTOMATED guard reads the heading and exactly ONE line after it -> an AUTOMATED line two below the first heading still fires repeated-feedback citing line 1 (a window that reaches two lines down, or up to the second entry, goes silent)",
+          rc == 0 and last(out) == "LEARN SUGGEST 1" and "repeated-feedback | 'same topic' x2, ARCHITECT_FEEDBACK.md:1" in out
+          and "unstable-card" not in out and "empty-pass" not in out and "Traceback" not in out, out)
+
+    # ================= learn.py: ratchet lag (floor default, >= 10, last 12 lines, FAIL last line, newest first, 6 files) =================
+    d = fx("d2_floor_default")
+    put(d, ".aw/ratchet.json", "{}")
+    put(d, ".hermes/plans/gate_output/g.txt", "GATE OK count=10\n")
+    rc, out = lrn(d)
+    # kills learn.py:111 row 7 (the min_tests default 0 -> 1) and :122 row 120 (the message reads best[1] instead of best[0])
+    check("learn.py: a ratchet.json without min_tests defaults the floor to 0 -> ratchet-lag fires for a measured 10 with 'floor 0 vs measured 10 in g.txt' (a default of 1 leaves it 9 short and silent)",
+          rc == 0 and last(out) == "LEARN SUGGEST 1" and "ratchet-lag | floor 0 vs measured 10 in g.txt" in out
+          and "hot-file" not in out and "Traceback" not in out, out)
+
+    a = fx("d2_floor_9")
+    put(a, ".aw/ratchet.json", '{"min_tests": 0}')
+    put(a, ".hermes/plans/gate_output/g.txt", "GATE OK count=9\n")
+    rc_a, o_a = lrn(a)
+    b = fx("d2_floor_10")
+    put(b, ".aw/ratchet.json", '{"min_tests": 0}')
+    put(b, ".hermes/plans/gate_output/g.txt", "GATE OK count=10\n")
+    rc_b, o_b = lrn(b)
+    # kills learn.py:121 row 16 (>= 10 -> >= 11)
+    check("learn.py: ratchet-lag needs measured - floor >= 10 -> a measured 9 is silent and a measured 10 fires (the >= 11 mutant leaves the boundary case silent)",
+          rc_a == 0 and "ratchet-lag" not in o_a and rc_b == 0 and "ratchet-lag | floor 0 vs measured 10 in g.txt" in o_b, o_a + o_b)
+
+    a = fx("d2_tail_13")
+    put(a, ".aw/ratchet.json", '{"min_tests": 0}')
+    put(a, ".hermes/plans/gate_output/g.txt", "GATE OK count=50\n" + "\n".join(["pad"] * 12) + "\n")
+    rc_a, o_a = lrn(a)
+    b = fx("d2_tail_12")
+    put(b, ".aw/ratchet.json", '{"min_tests": 0}')
+    put(b, ".hermes/plans/gate_output/g.txt", "GATE OK count=50\n" + "\n".join(["pad"] * 11) + "\n")
+    rc_b, o_b = lrn(b)
+    # kills learn.py:116 row 37 (the tail slice -12 -> -13): a count line 13 lines above the end must stay unseen
+    check("learn.py: ratchet-lag reads the last 12 lines of a gate file -> a count line 13 lines above the end is invisible, the same line 12 above it is found (a -13 slice reports 50 on the first fixture)",
+          rc_a == 0 and "ratchet-lag" not in o_a and rc_b == 0 and "ratchet-lag | floor 0 vs measured 50 in g.txt" in o_b, o_a + o_b)
+
+    d = fx("d2_gate_fail")
+    put(d, ".aw/ratchet.json", '{"min_tests": 0}')
+    put(d, ".hermes/plans/gate_output/g.txt", "GATE FAIL count=50 min=0\n")
+    rc, out = lrn(d)
+    # kills learn.py:118 row 51 (and -> or: a FAIL last line is accepted)
+    check("learn.py: a gate file whose LAST line holds FAIL is not a passing measurement, even when it carries count=50 -> no ratchet-lag (an `or` there reports 50)",
+          rc == 0 and "ratchet-lag" not in out and "Traceback" not in out, out)
+
+    a = fx("d2_two_gates")
+    put(a, ".aw/ratchet.json", '{"min_tests": 0}')
+    put(a, ".hermes/plans/gate_output/old.txt", "GATE OK count=20\n")
+    put(a, ".hermes/plans/gate_output/new.txt", "GATE OK count=40\n")
+    t0 = time.time()
+    os.utime(a / ".hermes/plans/gate_output/old.txt", (t0 - 100, t0 - 100))
+    os.utime(a / ".hermes/plans/gate_output/new.txt", (t0, t0))
+    rc_a, o_a = lrn(a)
+    b = fx("d2_seven_gates")
+    put(b, ".aw/ratchet.json", '{"min_tests": 0}')
+    for i in range(6):
+        put(b, ".hermes/plans/gate_output/n%d.txt" % i, "GATE OK\n")
+        os.utime(b / (".hermes/plans/gate_output/n%d.txt" % i), (t0 - i, t0 - i))
+    put(b, ".hermes/plans/gate_output/z.txt", "GATE OK count=50\n")
+    os.utime(b / ".hermes/plans/gate_output/z.txt", (t0 - 100, t0 - 100))
+    rc_b, o_b = lrn(b)
+    # kills learn.py:115 rows 104 (reverse sort) and 113 (the [:6] cap)
+    check("learn.py: the newest gate file is measured first and only the 6 newest are read -> 'in new.txt' and never old.txt, and a count in the 7th (oldest) of seven files stays unseen (an ascending sort names old.txt, a [:7] cap reports 50)",
+          rc_a == 0 and "ratchet-lag | floor 0 vs measured 40 in new.txt" in o_a and "old.txt" not in o_a
+          and rc_b == 0 and "ratchet-lag" not in o_b, o_a + o_b)
+
+    if shutil.which("git"):
+        d = fx("d2_stale")
+        put(d, ".hermes/plans/gate_output/g.txt", "GATE OK\n")
+        for n in ("a", "b", "c", "d"):
+            put(d, n + ".py", "x = 1\n")
+        sh(["git", "init", "-q"], cwd=d)
+        sh(["git", "add", "a.py", "b.py", "c.py", "d.py"], cwd=d)
+        t0 = time.time()
+        os.utime(d / ".hermes/plans/gate_output/g.txt", (t0, t0))
+        for n in ("a", "b", "c"):
+            os.utime(d / (n + ".py"), (t0 + 50, t0 + 50))
+        os.utime(d / "d.py", (t0 + 2.5, t0 + 2.5))
+        rc, out = lrn(d)
+        # kills learn.py:132 rows 55 (the +2 s tolerance -> +3: d.py drops out) and 44 (the e.g. slice [:3] -> [:4]: d.py is named)
+        check("learn.py: the stale-gate tolerance is 2 s -> a tracked file 2.5 s newer than the newest gate output is one of FOUR, and the evidence names only the first three (a 3 s tolerance finds three; a [:4] slice prints d.py)",
+              rc == 0 and last(out) == "LEARN SUGGEST 1"
+              and "stale-gate | 4 tracked file(s) newer than the newest gate output, e.g. a.py, b.py, c.py |" in out and "d.py" not in out, out)
+    else:
+        skip("learn.py: the stale-gate tolerance is 2 s and the evidence names three of four", "no git on PATH")
+
+    # ================= learn.py: hot files =================
+    a = fx("d2_hot3")
+    put(a, ".hermes/plans/WORKLOG.md", "\n".join(["- Files: app/x.py"] * 3) + "\n")
+    rc_a, o_a = lrn(a)
+    b = fx("d2_hot6")
+    put(b, ".hermes/plans/WORKLOG.md", "\n".join(["- Files: app/x.py"] * 6) + "\n")
+    rc_b, o_b = lrn(b)
+    # kills learn.py:158 row 8 (+= 1 -> += 2: three mentions read as six and fire)
+    check("learn.py: hot-file needs 6 mentions of one path -> three `- Files:` lines are silent and six fire with 'app/x.py touched in 6 worklog entries' (a doubled counter fires on the three)",
+          rc_a == 0 and "hot-file" not in o_a and rc_b == 0 and "hot-file | app/x.py touched in 6 worklog entries" in o_b, o_a + o_b)
+
+    d = fx("d2_hot4")
+    put(d, ".hermes/plans/WORKLOG.md", "\n".join(["- Files: a.py b.py c.py d.py"] * 6) + "\n")
+    rc, out = lrn(d)
+    # kills learn.py:159 row 107 (the top-three slice [:3] -> [:4])
+    check("learn.py: at most THREE hot files are reported -> four paths with six mentions each give LEARN SUGGEST 3 and d.py is never named (a [:4] slice reports four and names it)",
+          rc == 0 and last(out) == "LEARN SUGGEST 3" and "hot-file | a.py touched in 6 worklog entries" in out and "d.py" not in out, out)
+
+    d = fx("d2_hot9")
+    hidden = "- Files: " + " ".join([".hermes/h%d.md" % i for i in range(1, 7)])
+    put(d, ".hermes/plans/WORKLOG.md", "\n".join([hidden] * 7 + ["- Files: a.py b.py c.py"] * 6) + "\n")
+    rc, out = lrn(d)
+    # kills learn.py:159 row 117 (most_common(8) -> most_common(9): six hidden .hermes paths push c.py into the first three)
+    check("learn.py: the eight most touched paths are taken BEFORE .hermes/ is filtered out -> six .hermes paths at 7 mentions plus a.py/b.py at 6 give two hot files, c.py is never named (a most_common(9) names it)",
+          rc == 0 and last(out) == "LEARN SUGGEST 2" and "hot-file | a.py touched in 6 worklog entries" in out
+          and "hot-file | b.py touched in 6 worklog entries" in out and "c.py" not in out, out)
+
+    # ================= learn.py: family scan (which lines, how many cited) =================
+    d = fx("d2_defer")
+    put(d, ".hermes/plans/WORKLOG.md", "\n".join(["- Deferred: a", "- Deferred: b", "- deferred: c"]) + "\n")
+    put(d, ".hermes/plans/QUESTIONS.md", "- Deferred: z\n")
+    rc, out = lrn(d)
+    # kills learn.py:57 row 9 (the e.g. slice [:3] -> [:4]) and :48 row 103 (enumerate start 1 -> 2: every cited line moves)
+    check("learn.py: a recurring family cites the first three hits with their real line numbers -> '4 hits, e.g. WORKLOG.md:1, WORKLOG.md:2, WORKLOG.md:3' and no QUESTIONS.md (a [:4] slice lists the fourth, a shifted enumerate cites 2,3,4)",
+          rc == 0 and last(out) == "LEARN SUGGEST 1" and "recurring-deferral | 4 hits, e.g. WORKLOG.md:1, WORKLOG.md:2, WORKLOG.md:3 |" in out
+          and "QUESTIONS.md" not in out, out)
+
+    a = fx("d2_txt_scan")
+    for n in ("g1", "g2", "g3"):
+        put(a, ".hermes/plans/gate_output/" + n + ".txt", "the build timed out\n")
+    rc_a, o_a = lrn(a)
+    b = fx("d2_md_prose")
+    put(b, ".hermes/plans/WORKLOG.md", "\n".join(["we deferred it", "we deferred it again", "deferred once more"]) + "\n")
+    rc_b, o_b = lrn(b)
+    # kills learn.py:49 row 34 (the suffix test == -> !=: .txt drops to marker lines only, .md prose starts being scanned)
+    check("learn.py: every line of a gate_output .txt is scanned while a register .md only gives its #/|/-/* lines -> three 'timed out' lines fire recurring-timeout and three undashed 'deferred' prose lines stay silent (a flipped suffix test keeps both quiet / makes them fire)",
+          rc_a == 0 and "recurring-timeout | 3 hits, e.g. g1.txt:1, g2.txt:1, g3.txt:1" in o_a
+          and rc_b == 0 and "recurring-deferral" not in o_b, o_a + o_b)
+
+    # ================= learn.py: --write =================
+    a = fx("d2_write1")
+    put(a, ".hermes/plans/WORKLOG.md", "\n".join(["- Deferred: a", "- Deferred: b", "- Deferred: c"]) + "\n")
+    rc_a, o_a = lrn(a, "--write")
+    f = a / ".hermes/plans/LEARN_latest.md"
+    txt = f.read_text(encoding="utf-8") if f.is_file() else ""
+    b = fx("d2_write0")
+    put(b, ".hermes/plans/WORKLOG.md", "clean\n")
+    rc_b, o_b = lrn(b, "--write")
+    f0 = b / ".hermes/plans/LEARN_latest.md"
+    txt0 = f0.read_text(encoding="utf-8") if f0.is_file() else ""
+    # kills learn.py:185 row 35 (out and X or Y -> out or X: the list itself lands in the file) and row 0 (or -> and: a non-empty run ends the file with LEARN OK)
+    check("learn.py: --write ends LEARN_latest.md with 'LEARN SUGGEST 1' when it wrote one suggestion and with 'LEARN OK' when it wrote none (a `out or ...` prints the suggestion list itself, or 'LEARN SUGGEST 0' in the empty file)",
+          rc_a == 0 and f.is_file() and txt.strip().splitlines()[-1] == "LEARN SUGGEST 1" and "- LEARN SUGGEST recurring-deferral | 3 hits" in txt
+          and rc_b == 0 and f0.is_file() and txt0.strip().splitlines()[-1] == "LEARN OK", (txt[-200:], txt0[-200:]))
+
+    # ================= learn.py: AGENTS.md steering budget =================
+    a = fx("d2_agents6500")
+    put(a, "AGENTS.md", "x" * 6500)
+    rc_a, o_a = lrn(a)
+    b = fx("d2_agents6501")
+    put(b, "AGENTS.md", "x" * 6501)
+    rc_b, o_b = lrn(b)
+    # kills learn.py:178 row 18 (> 6500 -> > 6501: the 6501 case goes silent)
+    check("learn.py: steering-sprawl needs AGENTS.md over 6500 chars -> exactly 6500 is silent and 6501 fires with 'AGENTS.md is 6501 chars (> 6500)' (a > 6501 test leaves the 6501 case silent)",
+          rc_a == 0 and "steering-sprawl" not in o_a and rc_b == 0 and "steering-sprawl | AGENTS.md is 6501 chars (> 6500)" in o_b, o_a + o_b)
+
+    # ================= learn.py: WORKLOG parsing =================
+    def rows(pairs):
+        return "\n".join("## 2026-11-03T10:%02d:00+02:00 | %s | %s" % (i, cid, st) for i, (cid, st) in enumerate(pairs)) + "\n"
+
+    a = fx("d2_hf2")
+    put(a, ".hermes/plans/WORKLOG.md", rows([("T-001", "FAIL"), ("T-002", "FAIL")] + [("T-00%d" % i, "PASS") for i in range(3, 11)]))
+    rc_a, o_a = lrn(a)
+    b = fx("d2_hf3")
+    put(b, ".hermes/plans/WORKLOG.md", rows([("T-001", "FAIL"), ("T-002", "FAIL"), ("T-003", "FAIL")] + [("T-00%d" % i, "PASS") for i in range(4, 11)]))
+    rc_b, o_b = lrn(b)
+    # kills learn.py:92 row 52 (sum(1 for ...) -> sum(2 for ...): 2 of 10 read as 4) and :93 row 61 (fails * 5 -> * 6: 2 of 10 passes 2*6 > 10)
+    check("learn.py: high-fail-rate counts each FAIL once and needs fails*5 > tot -> 2 FAIL of 10 runs is silent, 3 FAIL of 10 fires '3/10 worklog runs FAIL/STOP' (a doubled counter or a *6 multiplier fires on the first fixture)",
+          rc_a == 0 and "high-fail-rate" not in o_a and "unstable-card" not in o_a
+          and rc_b == 0 and "high-fail-rate | 3/10 worklog runs FAIL/STOP" in o_b, o_a + o_b)
+
+    d = fx("d2_cardfirst")
+    put(d, ".hermes/plans/WORKLOG.md", "## T-004 | 2026-11-03T10:00:00+02:00 | FAIL\n## T-004 | 2026-11-03T11:00:00+02:00 | FAIL\n")
+    rc, out = lrn(d)
+    # kills learn.py:76 row 106 (ln[3:] -> ln[4:]: a card-first heading loses its id), :90 row 89 (bad[0][1] -> bad[0][2]: IndexError) and :71 row 10 (enumerate start 1 -> 2: the cited line moves)
+    check("learn.py: a WORKLOG heading written card-first ('## T-004 | date | FAIL') is read like any other -> unstable-card citing WORKLOG.md:1 with 2 of 2 runs (a ln[4:] slice loses the id, an index 2 raises, a start of 2 cites line 2)",
+          rc == 0 and last(out) == "LEARN SUGGEST 1" and "unstable-card | T-004: 2 FAIL/STOP of 2 runs, WORKLOG.md:1" in out
+          and "third-fail" not in out and "Traceback" not in out, out)
+
+    d = fx("d2_noid")
+    put(d, ".hermes/plans/WORKLOG.md", "## 2026-11-03 | FAIL | note\n")
+    rc, out = lrn(d)
+    # kills learn.py:79 row 77 (st and cid -> or: a heading with no card id is recorded under None and the replace search raises)
+    check("learn.py: a heading with a status but no card id is ignored -> LEARN OK and no Traceback (an `or` there records id None and dies in re.escape on the next loop)",
+          rc == 0 and last(out) == "LEARN OK" and "unstable-card" not in out and "Traceback" not in out, out)
+
+    d = fx("d2_indent")
+    put(d, ".hermes/plans/WORKLOG.md", " ## 2026-11-03T10:00:00+02:00 | T-008 | FAIL\n ## 2026-11-03T11:00:00+02:00 | T-008 | FAIL\n")
+    rc, out = lrn(d)
+    # kills learn.py:75 row 45 (and -> or: an indented row holding a pipe is read as a heading)
+    check("learn.py: only a line that STARTS with '## ' and holds a pipe is a WORKLOG heading -> two indented FAIL rows stay unread (LEARN OK; an `or` reads them as two runs of T-008 and fires unstable-card)",
+          rc == 0 and last(out) == "LEARN OK" and "unstable-card" not in out and "Traceback" not in out, out)
+
+    d = fx("d2_empty")
+    put(d, ".hermes/plans/WORKLOG.md", "## 2026-11-03T10:00:00+02:00 | T-001 | PASS\n- Files: none\n")
+    rc, out = lrn(d)
+    # kills learn.py:71 row 10 (enumerate start 1 -> 2: the citation moves to line 3)
+    check("learn.py: empty-pass cites the `- Files:` line that follows the PASS -> 'T-001 PASS lists no changed file, WORKLOG.md:2' (a start of 2 cites line 3)",
+          rc == 0 and "empty-pass | T-001 PASS lists no changed file, WORKLOG.md:2" in out
+          and "third-fail" not in out and "Traceback" not in out, out)
+
+    d = fx("d2_third")
+    put(d, ".hermes/plans/WORKLOG.md", "\n".join(["## 2026-11-03T10:00:00+02:00 | T-009 | FAIL"] * 3) + "\n")
+    rc, out = lrn(d)
+    # kills learn.py:88 row 23 (bad[0][1] -> bad[0][2]: IndexError) and :71 row 10 (the cited line)
+    check("learn.py: three FAIL runs of one card give third-fail (not unstable-card) citing WORKLOG.md:1 and '3 FAIL/STOP of 3 runs' (an index 2 raises, a start of 2 cites line 2)",
+          rc == 0 and "third-fail | T-009: 3 FAIL/STOP of 3 runs, WORKLOG.md:1" in out and "unstable-card" not in out and "Traceback" not in out, out)
+
+    # ================= learn.py: audit ledger =================
+    d = fx("d2_led1")
+    put(d, ".hermes/plans/AUDIT_LEDGER.md", "| AUD-01 | HIGH | f | e | OPEN | s\n")
+    rc, out = lrn(d)
+    # kills learn.py:102 row 21 (group(1) -> group(2): the message names HIGH), :99 row 102 (enumerate start: the line moves), :105 rows 101 and 111 (hi[0][2] -> hi[1][2]: IndexError on one finding)
+    check("learn.py: ONE open HIGH row -> open-severe names the finding id and its real line, '1 CRIT/HIGH OPEN: AUD-01, AUDIT_LEDGER.md:1', no Traceback (indexing hi[1] raises, a severity in place of the id or a line 2 fails here)",
+          rc == 0 and last(out) == "LEARN SUGGEST 1" and "open-severe | 1 CRIT/HIGH OPEN: AUD-01, AUDIT_LEDGER.md:1" in out
+          and "ledger-backlog" not in out and "Traceback" not in out, out)
+
+    d = fx("d2_led6")
+    put(d, ".hermes/plans/AUDIT_LEDGER.md", "".join("| AUD-%02d | HIGH | f | e | OPEN | s\n" % i for i in range(1, 7)))
+    rc, out = lrn(d)
+    # kills learn.py:105 row 76 (the id slice hi[:5] -> hi[:6])
+    check("learn.py: open-severe lists the first FIVE ids -> 6 CRIT/HIGH OPEN names AUD-01..AUD-05 and AUDIT_LEDGER.md:1, and AUD-06 is never named (a [:6] slice prints it)",
+          rc == 0 and "open-severe | 6 CRIT/HIGH OPEN: AUD-01, AUD-02, AUD-03, AUD-04, AUD-05, AUDIT_LEDGER.md:1" in out
+          and "AUD-06" not in out, out)
+
+    d = fx("d2_crlf")
+    for n in ("a", "b", "c", "d"):
+        put(d, ".hermes/plans/" + n + ".md", b"x = 1" + bytes([13, 13, 10]))
+    rc, out = lrn(d)
+    # kills learn.py:150 row 29 (the name slice _cc[:3] -> _cc[:4])
+    check("learn.py: crcrlf names the first THREE files holding CR CR LF -> four such registers report 'a.md, b.md, c.md' and never d.md (a [:4] slice prints it)",
+          rc == 0 and "crcrlf | a.md, b.md, c.md hold CR CR LF line endings" in out and "d.md" not in out, out)
+
+    # ================= findings_lint.py =================
+    d = work / "d2_find"
+    (d / ".hermes/plans").mkdir(parents=True, exist_ok=True)
+    put(d, "bad.md", "FINDING B0 | CONFIRMED | a.py:1 | ok | `ls`\n"
+                     "FINDING B1 | CONFIRMED | a.py:1 | no command here | looks wrong\n"
+                     "FINDING | CONFIRMED | a.py:4 | no id in the first cell | `ls`\n")
+    rc, out = sh([py, "-I", "-B", FL, "bad.md"], cwd=d)
+    # kills findings_lint.py:19 row 1 (enumerate start 1 -> 2: every reported line number moves)
+    check("findings_lint.py: the reported line number is the real one -> 'bad.md:2 CONFIRMED needs a backticked command' and 'bad.md:3 first cell must be ...', FINDINGS-LINT FAIL 2 (a start of 2 reports lines 3 and 4)",
+          rc == 1 and "bad.md:2 CONFIRMED needs a backticked command as evidence" in out
+          and "bad.md:3 first cell must be 'FINDING <id>', got 'FINDING'" in out and "FINDINGS-LINT FAIL 2" in out, out)
+
+    # ================= review_pack.py =================
+    if shutil.which("git"):
+        d = work / "d2_rp"
+        (d / ".hermes/plans").mkdir(parents=True, exist_ok=True)
+        sh(["git", "init", "-q"], cwd=d)
+        sh(["git", "config", "user.name", "Test"], cwd=d)
+        sh(["git", "config", "user.email", "t@e.invalid"], cwd=d)
+        put(d, "a.txt", "one\n")
+        sh(["git", "add", "-A"], cwd=d)
+        sh(["git", "commit", "-q", "-m", "c1"], cwd=d)
+        put(d, "a.txt", "one\ntwo\n")
+        sh(["git", "add", "-A"], cwd=d)
+        sh(["git", "commit", "-q", "-m", "c2"], cwd=d)
+        rc, out = sh([py, "-I", "-B", RP, "HEAD~1"], cwd=d)
+        pack = d / ".hermes/plans/gate_output/review_pack.diff"
+        txt = pack.read_text(encoding="utf-8") if pack.is_file() else ""
+        # kills review_pack.py:19 row 15 (len(sys.argv) < 2 -> < 3: one ref is treated as 'no argument' and the tag lookup fails)
+        check("review_pack.py: ONE argument is a fixed point, not 'no argument' -> the default pack is written with # commits, # stat and # diff holding the second commit, exit 0 (a < 3 test falls into the tag lookup, finds no tag and exits on the usage line)",
+              rc == 0 and "REVIEW-PACK OK" in out and "# commits" in txt and "# stat" in txt and "+two" in txt and "Traceback" not in out, (out, txt[-200:]))
+    else:
+        skip("review_pack.py: one argument is a fixed point, not 'no argument'", "no git on PATH")
+
+    # ================= worker_report.py =================
+    W = new_project(work, "d2_wr")
+    rc, out = sh([py, "-I", "-B", "tools/worker_report.py", "--ask", "Which", "timeout?"], cwd=W)
+    qp = W / ".hermes/plans/QUESTIONS.md"
+    q = qp.read_text(encoding="utf-8") if qp.is_file() else ""
+    # kills worker_report.py:6 row 0 (a != --ask -> a == --ask: the text is dropped and aw.py ask exits 2); row 2 (argv[1:] -> [2:]) is equivalent while argv[1] is --ask
+    check("worker_report.py: every argument after --ask reaches aw.py ask, word by word -> ASKED Q-001 and the recorded question is '> Which timeout?' (keeping only --ask drops the text and aw.py ask exits on its usage line)",
+          rc == 0 and "ASKED Q-001" in out and "> Which timeout?" in q, (out, q[-200:]))
+
+
+def section_gaps4(work: Path):
+    """Engine behaviour that survived a one-token mutation after 2.8.3 (third series): each check fails on a named mutant."""
+    print("\n-- gaps, third series: engine commands")
+    G = new_project(work, "gaps4")
+    plans = G / ".hermes/plans"
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def envline(txt, key, val):
+        """The whole KEY= line replaced: the old one dropped, the new one last (kit.env is line based)."""
+        return "\n".join([ln for ln in txt.split("\n") if not ln.startswith(key + "=")] + [key + "=" + val])
+
+    # ---- C3-01 the gate honours FAIL_REGEX (kills S29, aw.py:197)
+    put(G, "tests/boom.py", 'print("Ran 5 tests")\nprint("BOOM")\n')
+    env0 = (G / "tools/kit.env").read_text(encoding="utf-8")
+    put(G, "tools/kit.env", envline(envline(env0, "TEST_CMD", f"{sys.executable} -I -B tests/boom.py"), "FAIL_REGEX", "BOOM"))
+    rc1, o1 = aw(G, "gate", "boom")
+    put(G, "tests/boom.py", 'print("Ran 5 tests")\n')
+    rc2, o2 = aw(G, "gate", "calm")
+    put(G, "tools/kit.env", env0)
+    check("gate honours FAIL_REGEX: a suite that exits 0 but prints BOOM -> rc=1, 'GATE FAIL' with reason failure-pattern; the same suite without BOOM -> GATE OK count=5",
+          rc1 == 1 and "GATE FAIL" in o1 and "failure-pattern" in o1 and rc2 == 0 and "GATE OK count=5" in o2, (rc1, o1, rc2, o2))
+
+    # ---- C3-02 three usage refusals keep exit 2 (kills S106, S119, S22, S25, aw.py:209/495/607)
+    ra, oa = aw(G, "gate", "a", "b")
+    rb, ob = aw(G, "restore")
+    rc, oc = aw(G, "answer", "Q-001")
+    check("RED: three usage refusals: 'gate a b' -> 2 with 'usage: aw.py gate' and no gate_output/a.txt; 'restore' with no id -> 2 with 'usage: aw.py restore'; 'answer Q-001' with no text -> 2 with 'usage: aw.py answer'",
+          ra == 2 and "usage: aw.py gate" in oa and not (plans / "gate_output/a.txt").exists()
+          and rb == 2 and "usage: aw.py restore" in ob
+          and rc == 2 and "usage: aw.py answer" in oc, (ra, oa, rb, ob, rc, oc))
+
+    # ---- C3-03 RED: COUNT_REGEX without a capture group is a named refusal (kills S64, aw.py:73)
+    put(G, "tools/kit.env", envline(env0, "COUNT_REGEX", chr(92) + "d+ passed"))
+    rc, out = aw(G, "gate", "nogroup")
+    put(G, "tools/kit.env", env0)
+    check("RED: COUNT_REGEX without a capture group -> exit 2, 'COUNT_REGEX needs one capture group', no Traceback",
+          rc == 2 and "COUNT_REGEX needs one capture group" in out and "Traceback" not in out, (rc, out))
+
+    # ---- C3-04 integrity: the recorded floor, the baseline version, a missing floor (kills S37, S85, S109, S96, S16; aw.py:276-311)
+    I = new_project(work, "gaps4int")
+
+    def rat(n):
+        d = json.loads((I / ".aw/ratchet.json").read_text(encoding="utf-8")); d["min_tests"] = n
+        put(I, ".aw/ratchet.json", json.dumps(d))
+
+    def base(**kw):
+        d = json.loads((I / ".aw/baseline.json").read_text(encoding="utf-8")); d.update(kw)
+        put(I, ".aw/baseline.json", json.dumps(d))
+
+    def rebase():
+        rat(3); aw(I, "integrity", "--write-baseline", "--i-am-architect")
+
+    aw(I, "ratchet", "--raise", "3", "--i-am-architect")
+    aw(I, "integrity", "--write-baseline", "--i-am-architect")  # baseline version 2, floor 3
+    rat(1); ra, oa = aw(I, "integrity")
+    rb, ob = aw(I, "integrity", "--write-baseline", "--i-am-architect")
+    rebase()
+    rat(1); base(version=1, floor=99)
+    rc, oc = aw(I, "integrity", "--write-baseline", "--i-am-architect")
+    rebase()
+    rat(3)
+    d = json.loads((I / ".aw/baseline.json").read_text(encoding="utf-8")); d.pop("version", None); d["floor"] = 99
+    put(I, ".aw/baseline.json", json.dumps(d))
+    rc3, o3 = aw(I, "integrity")
+    rebase()
+    rat(0)
+    d = json.loads((I / ".aw/baseline.json").read_text(encoding="utf-8")); d.pop("floor", None); d["version"] = 2
+    put(I, ".aw/baseline.json", json.dumps(d))
+    rc4, o4 = aw(I, "integrity")
+    rebase()
+    check("integrity: a v2 baseline keeps its recorded floor 3 when the ratchet drops to 1 (RATCHET-LOWERED); the rewrite warns 'min_tests=1 < recorded floor 3' and keeps floor=3; a v1 baseline ignores floor 99 (floor=1, no WARN); a baseline with no 'version' is legacy (no RATCHET-LOWERED, no FROZEN-CHANGED); a v2 baseline without 'floor' tolerates ratchet 0",
+          ra == 1 and "RATCHET-LOWERED" in oa
+          and rb == 0 and "WARN ratchet.json min_tests=1 < recorded floor 3" in ob and "floor=3" in ob
+          and rc == 0 and "floor=1" in oc and "WARN ratchet" not in oc
+          and rc3 == 0 and "RATCHET-LOWERED" not in o3 and "FROZEN-CHANGED" not in o3
+          and rc4 == 0 and "RATCHET-LOWERED" not in o4,
+          (ra, oa, rb, ob, rc, oc, rc3, o3, rc4, o4))
+
+    # ---- C3-05 integrity prints six failures and a dots mark for more (kills S54, aw.py:307)
+    N = new_project(work, "gaps4int2")
+
+    def zfile(n):
+        put(N, ".aw/checks.d/zeros.py", "".join(f'print("ZERO z{i}", 1)\n' for i in range(1, n + 1)))
+
+    zfile(7)
+    aw(N, "integrity", "--write-baseline", "--i-am-architect")
+    r7, o7 = aw(N, "integrity")
+    zfile(6)
+    aw(N, "integrity", "--write-baseline", "--i-am-architect")
+    r6, o6 = aw(N, "integrity")
+    f7 = next((ln for ln in o7.splitlines() if ln.startswith("INTEGRITY FAIL")), "")
+    f6 = next((ln for ln in o6.splitlines() if ln.startswith("INTEGRITY FAIL")), "")
+    check("integrity: 7 failures -> the first line says 'INTEGRITY FAIL 7:', shows six (ZERO zeros.z6=1) and ends with ' ...', the indented lines still name z7; 6 failures -> 'INTEGRITY FAIL 6:' and no ' ...'",
+          r7 == 1 and "INTEGRITY FAIL 7:" in f7 and "ZERO zeros.z6=1" in f7 and "z7" not in f7
+          and f7.endswith(" ...") and "ZERO zeros.z7=1" in o7
+          and r6 == 1 and "INTEGRITY FAIL 6:" in f6 and " ..." not in f6, (f7, f6, o7[-200:]))
+
+    # ---- C3-06 queue-check prints six errors and a dots mark for more (kills S19, aw.py:1058)
+    Q = new_project(work, "gaps4q")
+
+    def qfile(n):
+        ids = " ".join(f"T-9{i:02d}:+0" for i in range(1, n + 1))
+        put(Q, ".hermes/plans/cards/QUEUE_probe.md", "# QUEUE\nChain: base=3 | " + ids + " | final=3\n")
+
+    qfile(7)
+    q7, qo7 = aw(Q, "queue-check", ".hermes/plans/cards/QUEUE_probe.md")
+    qfile(6)
+    q6, qo6 = aw(Q, "queue-check", ".hermes/plans/cards/QUEUE_probe.md")
+    l7 = next((ln for ln in qo7.splitlines() if ln.startswith("QUEUE-CHECK FAIL")), "")
+    l6 = next((ln for ln in qo6.splitlines() if ln.startswith("QUEUE-CHECK FAIL")), "")
+    check("queue-check: 7 errors -> 'QUEUE-CHECK FAIL 7:' ends with ' ...' and holds exactly six '; '-separated items; 6 errors -> 'QUEUE-CHECK FAIL 6:' and no ' ...'",
+          q7 == 1 and "QUEUE-CHECK FAIL 7:" in l7 and l7.count("; ") == 5 and l7.endswith(" ...")
+          and q6 == 1 and "QUEUE-CHECK FAIL 6:" in l6 and " ..." not in l6, (l7, l6))
+
+    # ---- C3-07 doctor: ledger-s8 keeps 40 characters, the CRLF list keeps 5 names (kills S26, S56, S33; aw.py:402, 1175-1200)
+    D = new_project(work, "gaps4doc")
+    led = D / ".hermes/plans/AUDIT_LEDGER.md"
+    b0 = led.read_bytes()
+    _, od0 = aw(D, "doctor")
+    put(D, ".hermes/plans/AUDIT_LEDGER.md", b0 + b"\n## 9. " + b"X" * 60 + b"\n")
+    _, od1 = aw(D, "doctor")
+    led.write_bytes(b0)
+    l0 = next((ln for ln in od0.splitlines() if "ledger-s8" in ln), "")
+    l1 = next((ln for ln in od1.splitlines() if "ledger-s8" in ln), "")
+    names = [".aw/c1.txt", ".aw/c2.txt", ".aw/c3.txt", ".aw/c4.txt", ".aw/c5.txt", ".aw/c6.txt"]
+    for rel in names[:3]:
+        put(D, rel, b"a\r\nb\r\n")
+    _, od2 = aw(D, "doctor")
+    for rel in names[3:]:
+        put(D, rel, b"a\r\nb\r\n")
+    _, od3 = aw(D, "doctor")
+    for rel in names:
+        (D / rel).unlink()
+    e3 = next((ln for ln in od2.splitlines() if "line-endings" in ln), "")
+    e6 = next((ln for ln in od3.splitlines() if "line-endings" in ln), "")
+    check("doctor: ledger-s8 is OK on the pristine ledger and WARN after a '## 9.' heading, whose repr keeps 40 characters (34 X, no 35th); the CRLF list over the files it scans says '3 file(s) with CRLF' with no ' +', then '6 file(s) with CRLF' with five names and ' +1'",
+          l0.startswith("DOCTOR OK ledger-s8:")
+          and l1.startswith("DOCTOR WARN ledger-s8:") and "'## 9. " + "X" * 34 in l1 and l1.count("X") == 34
+          and "3 file(s) with CRLF" in e3 and " +" not in e3
+          and "6 file(s) with CRLF" in e6 and " +1" in e6 and sum(1 for x in names if x in e6) == 5,
+          (l0, l1, e3, e6))
+
+    # ---- C3-08 restore tells an unchanged file from a rewritten one (kills S40, aw.py:514)
+    put(G, "keep/a.py", "v1\n")
+    aw(G, "start", "T-081")
+    aw(G, "backup", "T-081", "keep/a.py")
+    ra, oa = aw(G, "restore", "T-081")
+    put(G, "keep/a.py", "v2\n")
+    rb, ob = aw(G, "restore", "T-081")
+    check("restore: an identical file prints no 'RESTORE --write' (only 'RESTORED 1 file(s)'); a rewritten file prints 'RESTORE --write keep/a.py' and gets v1 back",
+          ra == 0 and "RESTORE --write" not in oa and "RESTORED 1 file(s)" in oa
+          and rb == 0 and "RESTORE --write keep/a.py" in ob and (G / "keep/a.py").read_bytes() == b"v1\n", (ra, oa, rb, ob))
+
+    # ---- C3-09 audit: a marker of another task, a legacy plain-text marker (kills S91, S76; aw.py:362, 434)
+    U = new_project(work, "gaps4aud")
+    aw(U, "ratchet", "--raise", "3", "--i-am-architect")
+    put(U, ".hermes/plans/cards/T-050.md", LINT_CARD_ROTE)
+    aw(U, "integrity", "--write-baseline", "--i-am-architect")
+    aw(U, "start", "T-051")
+    ra, oa = aw(U, "audit", "T-050", env={"OWNS": "src/a.py"})
+    put(U, ".aw/task-start", "T-052 extra words\n")
+    rb, ob = aw(U, "audit", "T-050", env={"OWNS": "src/a.py"})
+    check("audit: a marker taken for T-051 -> \"task-start is 'T-051'\" and 'OWNS UNMEASURED (task-start mismatch)'; a plain-text marker is legacy -> \"task-start is 'T-052'\" (its first word), not 'extra'",
+          ra == 1 and "task-start is 'T-051'" in oa and "OWNS UNMEASURED (task-start mismatch)" in oa
+          and "task-start is 'T-052'" in ob, (ra, oa, rb, ob))
+
+    # ---- C3-10 secrets scan: a bare name in .gitignore hides a nested secret-type file (kills S93, aw.py:338)
+    S = new_project(work, "gaps4sec")
+    put(S, "sub/.env", "x\n")
+    put(S, ".gitignore", ".env\n")
+    ra, oa = aw(S, "audit")
+    put(S, ".gitignore", "")
+    rb, ob = aw(S, "audit")
+    put(S, ".gitignore", "sub/.env\n")
+    rc, oc = aw(S, "audit")
+    check("secrets scan: '.env' in .gitignore -> 'WARN FILE sub/.env (secret-type name, git-ignored' and no 'NOT in .gitignore'; an empty .gitignore -> 'FILE sub/.env (secret-type name, NOT in .gitignore)'; the relative path 'sub/.env' -> the WARN again",
+          "WARN FILE sub/.env (secret-type name, git-ignored" in oa and "FILE sub/.env (secret-type name, NOT in .gitignore)" not in oa
+          and "FILE sub/.env (secret-type name, NOT in .gitignore)" in ob
+          and "WARN FILE sub/.env (secret-type name, git-ignored" in oc and "FILE sub/.env (secret-type name, NOT in .gitignore)" not in oc,
+          (ra, oa, rb, ob, rc, oc))
+
+
+def section_gaps5(work: Path):
+    """Card-lint, queue-check and modules behaviour that survived a one-token mutation after 2.8.3 (third series)."""
+    print("\n-- gaps, third series: card-lint, queue-check, modules")
+    G = new_project(work, "gaps5")
+    plans = G / ".hermes/plans"
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    aw(G, "ratchet", "--raise", "3", "--i-am-architect")
+    R = LINT_CARD_ROTE.replace("T-050", "T-099")
+    ROW2 = '| 2 | `python3 -c "print(1)" | tail -1` | `1` |'
+    BLK = "```bash\ncat > src/a.py <<'EOF'\nx = 1\nEOF\n```\n"
+    DRY = "## DRY-RUN PROOF\n```bash\n$ bash tools/gate.sh pre-T-099\nGATE OK count=3 min=3\n$ python3 -I -B tools/aw.py integrity\nINTEGRITY OK frozen=0 metrics=0 (core=32)\n```\n"
+
+    def lint(text, cid="T-099"):
+        put(G, ".hermes/plans/cards/" + cid + ".md", text)
+        return aw(G, "card-lint", cid)
+
+    def has(out, rule, *toks):
+        return any(rule in ln and all(t in ln for t in toks) for ln in out.splitlines())
+
+    def rules(out):
+        tab = {}
+        for ln in out.splitlines():
+            if ln.startswith("LINT "):
+                p = ln.split()
+                tab.setdefault(p[2], []).append(int(p[4].rstrip(":")))
+        return tab
+
+    def line_of(text, needle):
+        for n, ln in enumerate(text.split("\n"), 1):
+            if ln == needle:
+                return n
+        return 0
+
+    # ---- C4-01: `cp` and `mv` in a step are write targets (kills S3)
+    cp = R.replace(ROW2, "| 2 | `cp tmp/x.txt src/b.py` | `file exists` |")
+    mv = R.replace(ROW2, "| 2 | `mv a.txt src/c.py` | `file exists` |")
+    r1, o1 = lint(cp)
+    r2, o2 = lint(cp.replace("- src/a.py\n", "- src/a.py\n- src/b.py\n"))
+    r3, o3 = lint(mv)
+    r4, o4 = lint(mv.replace("- src/a.py\n", "- src/a.py\n- src/c.py\n"))
+    check("card-lint L10: `cp tmp/x.txt src/b.py` and `mv a.txt src/c.py` in a STEPS row are write targets -> L10 names src/b.py / src/c.py outside OWNS; the same rows with the target added to OWNS give no L10",
+          r1 == 1 and has(o1, "L10", "src/b.py")
+          and r2 == 1 and not has(o2, "L10")
+          and r3 == 1 and has(o3, "L10", "src/c.py")
+          and r4 == 1 and not has(o4, "L10") and "Traceback" not in o1 + o2 + o3 + o4,
+          (o1, o2, o3, o4))
+
+    # ---- C4-02: a missing section is reported at line 1, an empty one at its own heading (kills S65, S117, S53, S35)
+    rt, ot = lint("# T-099 - probe\n")
+    tabt = rules(ot)
+    empty = R.replace("## OWNS\n- src/a.py\n", "## OWNS\n\n").replace("CHAIN: ran=3 +0 -> ran=3 (MEASURED)\n", "")
+    re_, oe = lint(empty)
+    tabe = rules(oe)
+    own_line, gate_line = line_of(empty, "## OWNS"), line_of(empty, "## GATE")
+    check("card-lint: a card holding only its title reports L07/L14/L15/L35 (and any L40) at line 1; an empty `## OWNS` and an empty `## GATE` are reported at their own heading line, the first element of `SEC.get(...)`, not at the section end",
+          all(x == 1 for k in ("L07", "L14", "L15", "L35", "L40") for x in tabt.get(k, [1]))
+          and set(("L07", "L14", "L15", "L35")) <= set(tabt)
+          and tabe.get("L07") == [own_line] and tabe.get("L14") == [gate_line] and "Traceback" not in ot + oe,
+          (tabt, tabe, own_line, gate_line))
+
+    # ---- C4-03: a placeholder inside DRY-RUN PROOF is allowed, one after it is not (kills S4)
+    inside = R.replace(DRY, "## DRY-RUN PROOF\nTODO was printed by the tool and is kept verbatim\n```text\nGATE OK count=3 min=3\n```\n")
+    after = R + "## NOTES\nTODO moved out of the proof\n"
+    stale = R.replace(DRY, "## DRY-RUN PROOF\nmin=9 pasted from an older gate\n```bash\n$ bash tools/gate.sh pre-T-099\nGATE OK count=3 min=3\n$ python3 -I -B tools/aw.py integrity\nINTEGRITY OK frozen=0 metrics=0 (core=32)\n```\n")
+    ri, oi = lint(inside)
+    ra, oa = lint(after)
+    rst, ost = lint(stale)
+    todo_line = line_of(after, "TODO moved out of the proof")
+    check("card-lint L06: `TODO` inside DRY-RUN PROOF is not a placeholder error; the same line one section further down is L06 at its own line; a stale `min=9` inside that section is skipped by the same guard (line 912), so it is no L16",
+          ri == 0 and "CARD-LINT OK errors=0" in oi and not has(oi, "L06")
+          and ra == 1 and rules(oa).get("L06") == [todo_line] and has(oa, "L06", "TODO")
+          and rst == 0 and not has(ost, "L16")
+          and "Traceback" not in oi + oa + ost, (oi, oa, ost, todo_line))
+
+    # ---- C4-04: a RED PROOF section with only blank lines is empty (kills S14)
+    blank = R.replace("n/a - characterization: the check must pass on the first run", "\n\n")
+    real = R.replace("n/a - characterization: the check must pass on the first run", "\n\nFAIL x")
+    rp_line = line_of(R, "## RED PROOF")
+    rb, ob = lint(blank)
+    rr, orr = lint(real)
+    check("card-lint L35: a RED PROOF of two blank lines is empty (line = the RED PROOF heading); with `FAIL x` below them the empty message is gone and the ROTE wording rule reports instead",
+          rb == 1 and rules(ob).get("L35") == [rp_line] and has(ob, "L35", "empty")
+          and rr == 1 and not has(orr, "L35", "empty") and has(orr, "L35", "ROTE")
+          and "Traceback" not in ob + orr, (ob, orr, rp_line))
+
+    # ---- C4-05: four OWNS shapes are refused, a plain path is not (kills S89)
+    shapes = (("src" + chr(92) + "a.py", "backslash"), ("src/../a.py", "dotdot"), ("C:/a.py", "drive"), ("/etc/a.py", "absolute"))
+    seen, bad = [], []
+    for shape, label in shapes:
+        rshape, oshape = lint(R.replace("- src/a.py\n", "- " + shape + "\n"))
+        seen.append((label, rshape, [x for x in oshape.splitlines() if "L07" in x]))
+        if not (rshape == 1 and rules(oshape).get("L07") == [1] and has(oshape, "L07", "project-relative") and "Traceback" not in oshape):
+            bad.append(label)
+    rplain, oplain = lint(R)
+    check("card-lint L07: OWNS `src`+backslash+`a.py`, `src/../a.py`, `C:/a.py` and `/etc/a.py` are each refused at line 1 with the project-relative message; `src/a.py` is not",
+          not bad and rplain == 0 and not has(oplain, "L07", "project-relative") and "Traceback" not in oplain,
+          (seen, bad, rplain, oplain))
+
+    # ---- C4-06: a malformed Status line is reported at that line (kills S71)
+    bad_status = R.replace("Status: READY | Lane: ROTE | Depends: - | Module: - | Author decisions needed: none", "Status: READY | Lane: ROTE | Depends: -")
+    rs, ostatus = lint(bad_status)
+    status_line = line_of(bad_status, "Status: READY | Lane: ROTE | Depends: -")
+    check("card-lint L03: a Status line missing `Module:` and `Author decisions needed:` -> L03 at the line that holds it",
+          rs == 1 and rules(ostatus).get("L03") == [status_line] and has(ostatus, "L03", "malformed")
+          and "Traceback" not in ostatus, (ostatus, status_line))
+
+    # ---- C4-07: _overlap with an empty tail, and with two incompatible tails (kills S82)
+    Q = new_project(work, "gaps5q")
+    aw(Q, "gate", "baseline")
+    aw(Q, "ratchet", "--raise", "3", "--i-am-architect")
+    aw(Q, "integrity", "--write-baseline", "--i-am-architect")
+    for cid, owns in (("T-061", "src/k*"), ("T-062", "src/kb*"), ("T-063", "src/k*.py"), ("T-064", "src/kb*.txt"), ("T-065", "lib/k*")):
+        put(Q, ".hermes/plans/cards/" + cid + ".md", LINT_CARD_ROTE.replace("T-050", cid).replace("src/a.py", owns))
+
+    def queue(name, a, b):
+        put(Q, ".hermes/plans/cards/" + name + ".md", "# QUEUE\nChain: base=3 | " + a + ":+0 " + b + ":+0 | final=3\nQUEUE DONE 0 PASS / 0 FAIL / 0 STOP\n")
+        return aw(Q, "queue-check", ".hermes/plans/cards/" + name + ".md")
+    q1, oq1 = queue("QUEUE_g5a", "T-061", "T-062")
+    q2, oq2 = queue("QUEUE_g5b", "T-065", "T-061")
+    q3, oq3 = queue("QUEUE_g5c", "T-063", "T-064")
+    check("queue-check: `src/k*` and `src/kb*` (empty tails) overlap -> FAIL naming T-062; `src/k*` and `lib/k*` do not; `src/k*.py` and `src/kb*.txt` do not (two non-empty tails that end differently)",
+          q1 == 1 and has(oq1, "overlap", "T-062") and has(oq1, "T-061")
+          and q2 == 0 and "QUEUE-CHECK OK" in oq2 and q3 == 0 and "QUEUE-CHECK OK" in oq3
+          and "Traceback" not in oq1 + oq2 + oq3, (oq1, oq2, oq3))
+
+    # ---- C4-08: a number in prose is allowed only in the proof text (kills S70)
+    num = R.replace(ROW2, '| 2 | `python3 -c "print(1)" | tail -1` | `12345 items` |')
+    proved = num.replace("GATE OK count=3 min=3\n", "GATE OK count=3 min=3\nseen count=12345\n")
+    rn, on = lint(num)
+    rn2, on2 = lint(proved)
+    check("card-lint L18: `12345` in a STEPS Expected is reported (not in {chain,floor} nor the proof); the same card with `12345` inside DRY-RUN PROOF is silent",
+          rn == 1 and has(on, "L18", "12345") and rn2 == 0 and not has(on2, "L18")
+          and "Traceback" not in on + on2, (on, on2))
+
+    # ---- C4-09: a module row without a wave is wave 0, an empty OWNS cell is no owner (kills S27)
+    MOD = new_project(work, "gaps5mod")
+    head = "# MODULES\n| ID | Module | Purpose | OWNS | Depends | Wave | Gate | Decides | Status |\n|---|---|---|---|---|---|---|---|---|\n"
+    put(MOD, ".hermes/plans/MODULES.md", head + "| M-01 | core | the core | src/*.py | - | - | gate | architect | TODO |\n"
+        "| M-02 | api | the api | lib/*.py | M-01 | W-1 | gate | architect | TODO |\n")
+    rm1, om1 = aw(MOD, "modules")
+    put(MOD, ".hermes/plans/MODULES.md", head + "| M-01 | core | the core |  | - | W-1 | gate | architect | TODO |\n")
+    rm2, om2 = aw(MOD, "modules")
+    check("modules: a row with no wave is the only error and the wave counts as 0, so a W-1 module may depend on it (no same/later-wave error); a row with an empty OWNS cell -> MODULES OK modules=1 waves=1 and no Traceback",
+          rm1 == 1 and "MODULES FAIL 1" in om1 and has(om1, "M-01", "Wave") and not has(om1, "same/later")
+          and rm2 == 0 and "MODULES OK modules=1 waves=1" in om2 and "Traceback" not in om1 + om2, (om1, om2))
+
+    # ---- C4-10: bash -n errors carry the shell's own words (kills S38)
+    badsh = R.replace(BLK, "```bash\ncat > src/a.py <<'EOF'\nx = 1\nEOF\necho \"unterminated\n```\n")
+    rsh, osh = lint(badsh)
+    rok, ook = lint(R)
+    check("card-lint L23: a ```bash block with an unterminated double quote -> one L23 line carrying `bash -n:` and the shell's `unexpected EOF` (the first run is captured, so the shell text appears once, not twice); the valid block gives no such line",
+          rsh == 1 and has(osh, "L23", "bash -n:") and "unexpected EOF" in osh and osh.count("unexpected EOF") == 1
+          and rok == 0 and "bash -n:" not in ook and "Traceback" not in osh + ook, (osh, ook))
+
+    # ---- C4-11: ~~~ fences are blocks, an unclosed fence ends at EOF, a heredoc needs its terminator (kills S77)
+    tilde = R.replace(BLK, "~~~bash\ncp tmp/x.txt src/b.py\n~~~\n")
+    unclosed = R.replace(BLK, "```bash\ncat > src/a.py <<'EOF'\nx = 1\nEOF\n")
+    noend = R.replace(BLK, "```bash\ncat > src/a.py <<'EOF'\nx = 1\n```\n")
+    rti, oti = lint(tilde)
+    run, oun = lint(unclosed)
+    rne, one = lint(noend)
+    check("card-lint fences: a `~~~bash` block closed by `~~~` is a command section (its `cp` line is a write target outside OWNS); a ``` fence never closed runs to the last line with no Traceback; a heredoc without its `EOF` line -> L23 `heredoc EOF has no closing line`, with it -> silent",
+          rti == 1 and has(oti, "L10", "src/b.py")
+          and "Traceback" not in oun and "missing H2" in oun
+          and rne == 1 and has(one, "L23", "heredoc") and "Traceback" not in oti + oun + one, (oti, oun, one))
+
+
+def section_gaps_mod3(work: Path):
+    """Behaviour that a one-token change of learn.py, init_project.py, setup_project.py or worker_report.py could alter
+    with the suite still green, third series. Replays the survivors of wk/D3_learn.jsonl, wk/D3_init.jsonl,
+    wk/D3_setup.jsonl and wk/D3_report.jsonl; every check names the rows it kills."""
+    print("\n-- gaps, third series: module tools")
+    py = sys.executable
+    LRN = str(KIT / "payload/tools/learn.py")
+    INIT = str(KIT / "init_project.py")
+    SETUP = str(KIT / "setup_project.py")
+
+    def put(P, rel, data):
+        (P / rel).parent.mkdir(parents=True, exist_ok=True)
+        (P / rel).write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def ini(*a):
+        return sh([py, "-B", INIT, *a], cwd=work)
+
+    # ================= learn.py: empty-pass, the CHK/AUD exemption =================
+    d = work / "d3_empty_pass"
+    put(d, ".hermes/plans/WORKLOG.md",
+        "## 2026-11-09T10:00:00+02:00 | T-801 | PASS\n- Files: none\n"
+        "## 2026-11-09T10:01:00+02:00 | CHK-801 | PASS\n- Files: none\n"
+        "## 2026-11-09T10:02:00+02:00 | AUD-801 | PASS\n- Files: none\n")
+    rc, out = sh([py, "-I", "-B", LRN, str(d)], cwd=work)
+    # kills learn.py:73 row 64 (cur[0] -> cur[1]: the exemption reads the status, so CHK and AUD lose it)
+    check("learn.py: a PASS whose `- Files:` line lists no file is an empty-pass for T-801 and never for a CHK or an AUD card -> 'empty-pass | T-801 PASS lists no changed file, WORKLOG.md:2', LEARN SUGGEST 1 and neither id named (a cur[1] exempts nobody)",
+          rc == 0 and (out.strip().splitlines() or [""])[-1] == "LEARN SUGGEST 1"
+          and "empty-pass | T-801 PASS lists no changed file, WORKLOG.md:2" in out
+          and "CHK-801" not in out and "AUD-801" not in out and "Traceback" not in out, out)
+
+    # ================= init_project.py: a GUIDE.md when .hermes/plans is already there =================
+    G1 = work / "d3_guide_plain"
+    put(G1, ".hermes/plans/NOTES.md", "one file the owner already has\n")
+    r1, o1 = ini(str(G1), "--lang", "en")
+    g1 = G1 / ".hermes/plans/GUIDE.md"
+    had = g1.is_file()
+    (G1 / ".hermes").rename(G1 / ".hermes.off")
+    r2, o2 = ini(str(G1), "--lang", "en")
+    # init_project.py:180 row 52 (parents=True -> False) SURVIVED: the payload ships .hermes/plans files, so the loop
+    # above line 180 recreates .hermes on every install and the mkdir there always finds its parent (measured; SURVIVED-AFTER)
+    check("init_project.py plain install (line 178-181): a target that already holds .hermes/plans (one file, no GUIDE.md) and the same target with no .hermes level at all -> exit 0, no Traceback and .hermes/plans/GUIDE.md written both times (the payload loop recreates .hermes before the guide is written)",
+          had and r1 == 0 and r2 == 0 and "Traceback" not in o1 + o2 and g1.is_file(), (r1, o1[-200:], r2, o2[-200:]))
+
+    G2 = work / "d3_guide_stage"
+    G2.mkdir(parents=True, exist_ok=True)
+    ini(str(G2), "--lang", "en")
+    g2 = G2 / ".hermes/plans/GUIDE.md"
+    put(G2, ".hermes/plans/GUIDE.md", g2.read_bytes() + b"\nEDITED-1\n")
+    put(G2, "kit_stage/.hermes/plans/keep.md", "one file the owner already has\n")
+    r3, o3 = ini(str(G2), "--lang", "en")
+    kd = G2 / "kit_stage/.hermes/plans/GUIDE.md"
+    kd3 = kd.is_file()
+    (G2 / "kit_stage").rename(G2 / "kit_stage.off")
+    put(G2, ".hermes/plans/GUIDE.md", g2.read_bytes() + b"\nEDITED-2\n")
+    r4, o4 = ini(str(G2), "--lang", "en")
+    # kills init_project.py:187 row 41 (parents=True -> False: FileNotFoundError on the missing kit_stage/.hermes level,
+    # reached only when kit_stage/ is absent: the first run keeps the spec's already-present directory)
+    check("init_project.py staged branch (line 183-188): an edited .hermes/plans/GUIDE.md with kit_stage/.hermes/plans already there and with no kit_stage at all -> exit 0, no Traceback, kit_stage/.hermes/plans/GUIDE.md written both times (mkdir parents=True; False dies on the missing level)",
+          kd3 and r3 == 0 and r4 == 0 and "Traceback" not in o3 + o4 and kd.is_file(), (r3, o3[-200:], r4, o4[-200:]))
+
+    # ================= setup_project.py: the owner order =================
+    gname = work / "d3_git_named"
+    gname.write_bytes(b"[user]\n\tname = GitName\n\temail = t@e.invalid\n")
+    gnone = work / "d3_git_empty"
+    gnone.write_bytes(b"")
+    sysname = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True,
+                             env=dict(os.environ, GIT_CONFIG_GLOBAL=str(gnone))).stdout.strip()
+    cases = [("d3_own_git", str(gname), {"USERNAME": "EnvUser", "USER": "EnvUser2"}, "GitName")]
+    if sysname:
+        print(f"BLOCKED D3-03 b-d: `git config user.name` still returns {sysname!r} with an empty GIT_CONFIG_GLOBAL")
+    else:
+        cases += [("d3_own_username", str(gnone), {"USERNAME": "EnvUser", "USER": "EnvUser2"}, "EnvUser"),
+                  ("d3_own_user", str(gnone), {"USER": "EnvUser2"}, "EnvUser2"),
+                  ("d3_own_none", str(gnone), {}, "Owner")]
+    got = []
+    for dname, gcfg, extra, want in cases:
+        d = work / dname
+        d.mkdir(parents=True, exist_ok=True)
+        e = os.environ.copy()
+        e.pop("USERNAME", None)
+        e.pop("USER", None)
+        e.update(extra)
+        e["GIT_CONFIG_GLOBAL"] = gcfg
+        r = subprocess.run([py, "-B", SETUP, str(d), dname], cwd=str(d), stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", env=e, timeout=120)
+        ag = d / "AGENTS.md"
+        txt = ag.read_text(encoding="utf-8", errors="replace") if ag.is_file() else ""
+        got.append((want, r.returncode, f"(owner: {want}," in txt))
+    # kills setup_project.py:27 rows 13 (or -> and before USER: the USER case names "Owner") and 18 (and between
+    # USERNAME and USER: the USERNAME case names USER); the env is os.environ.copy() with the two variables popped
+    check("setup_project.py owner order git name, USERNAME, USER, Owner -> the installed AGENTS.md carries (owner: GitName, with a git name, (owner: EnvUser, with only USERNAME, (owner: EnvUser2, with only USER and (owner: Owner, with neither (an `and` in the or-chain names the wrong one)",
+          [w for w, _, _ in got][0] == "GitName" and all(rc == 0 and ok for _, rc, ok in got), got)
+
+    # ================= worker_report.py: the arguments reach aw.py =================
+    W = new_project(work, "gaps_wr")
+    rb, ob = sh([py, "-I", "-B", "tools/worker_report.py", "--bogus"], cwd=W)
+    rn, on = sh([py, "-I", "-B", "tools/worker_report.py"], cwd=W)
+    rep = W / ".hermes/plans/REPORT_latest.md"
+    # kills worker_report.py:6 row 2 (argv[1:] -> argv[2:]: the first argument is dropped, aw.py report runs green)
+    check("worker_report.py forwards every argument to aw.py -> `--bogus` comes back as the engine's refusal ('unknown flag --bogus', exit 2) and no argument writes the report ('REPORT written', exit 0); an argv[2:] slice drops the flag and the report runs instead",
+          rb == 2 and "unknown flag --bogus" in ob and rn == 0 and "REPORT written" in on and rep.is_file(), (rb, ob, rn, on))
+
+    # ================= init_project.py: exec bits on the installed scripts (POSIX only) =================
+    if os.name == "posix":
+        EX = work / "d3_exec"
+        rex, oex = ini(str(EX), "--lang", "en")
+        # payload holds AGENTS.md and tools/ only: the installed tree has no init_project.py, so the name clause of
+        # line 174 cannot be seen there (BLOCKED in wk/REPORT.md); tools/kit.env is neither .sh nor .py and must stay plain
+        want_x = ("tools/gate.sh", "tools/re_audit.sh", "tools/aw.py")
+        bits = {f: (os.stat(EX / f).st_mode & 0o100) for f in want_x if (EX / f).is_file()}
+        env_x = os.stat(EX / "tools/kit.env").st_mode & 0o100 if (EX / "tools/kit.env").is_file() else -1
+        md_x = os.stat(EX / "AGENTS.md").st_mode & 0o100 if (EX / "AGENTS.md").is_file() else -1
+        # kills init_project.py:174 rows 7 (and -> or: every path under tools, tools/kit.env included, gets the bit)
+        # and 29 (or -> and: only the three named paths get it, tools/aw.py does not)
+        check("init_project.py marks the installed tools/gate.sh, tools/re_audit.sh and tools/aw.py user-executable and leaves tools/kit.env and AGENTS.md alone (the .sh/.py under tools rule; an `or` gives kit.env the bit, an `and` takes it from aw.py)",
+              rex == 0 and len(bits) == 3 and all(bits.values()) and not env_x and not md_x, (rex, bits, env_x, md_x))
+    else:
+        skip("init_project.py exec bits", "Windows has no exec bit: UNMEASURED on Linux and macOS")
+
+
 def main() -> int:
     t0 = time.time()
     given = len(sys.argv) > 1 and not sys.argv[1].startswith("-")
@@ -1471,6 +2983,14 @@ Last line: `QUEUE DONE <n PASS> / <n FAIL> / <n STOP>`
               and w3 and w3.startswith("-p other-worker chat --reasoning high --in ")
               and w4[0] is None and "all 1 cards already have a WORKLOG entry" in w4[2] and not list(ltmp.glob("aw_worker_*")), (w1, w2, w3, w4, sorted(p_.name for p_ in ltmp.iterdir())))
 
+    section_gaps(work)
+    section_gaps2(work)
+    section_gaps3(work)
+    section_gaps_mod1(work)
+    section_gaps_mod2(work)
+    section_gaps4(work)
+    section_gaps5(work)
+    section_gaps_mod3(work)
     section_lint(work)
 
     # ---- every pristine check must still exist (allowing a documented rename)

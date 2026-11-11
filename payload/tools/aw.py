@@ -275,16 +275,14 @@ def _integrity(fl, kv) -> tuple[int, str]:
     user = sum(1 for k in man if not is_core(k)); core = len(man) - user
     if "--write-baseline" in fl:
         if "--i-am-architect" not in fl: die("--write-baseline is architect-only -> add --i-am-architect (LAW-9)", 2)
-        old = jload(bp, {}); ceil = {k: min(v, old.get("ceilings", {}).get(k, v)) for k, v in m.items()}; note = ""
+        old = jload(bp, {}); ceil = {k: min(v, old.get("ceilings", {}).get(k, v)) for k, v in m.items()}
         rat = to_int(jload(AW / "ratchet.json", {}).get("min_tests", 0)); oldfloor = to_int(old.get("floor", 0)) if to_int(old.get("version", 1)) >= 2 else 0
         floor = max(rat, oldfloor)
         if rat < oldfloor:
-            print(f"WARN ratchet.json min_tests={rat} < recorded floor {oldfloor} -> the baseline keeps {oldfloor} (only the architect raises it)"); note = ""
-        if to_int(old.get("version", 1)) >= 2 and floor < to_int(old.get("floor", 0)):
-            note = f" LOWERED from {old.get('floor')} (architect act - record it in the ledger)"
+            print(f"WARN ratchet.json min_tests={rat} < recorded floor {oldfloor} -> the baseline keeps {oldfloor} (only the architect raises it)")
         jsave(bp, {"version": 2, "ceilings": ceil, "manifest": man, "floor": floor})
-        append_log(f"{now()} baseline files={user} core={core} metrics={len(ceil)} floor={floor}{note}\n")
-        msg = f"BASELINE WRITTEN files={user} metrics={len(ceil)} core={core} floor={floor}{note} (record it in AUDIT_LEDGER)"; print(msg)
+        append_log(f"{now()} baseline files={user} core={core} metrics={len(ceil)} floor={floor}\n")
+        msg = f"BASELINE WRITTEN files={user} metrics={len(ceil)} core={core} floor={floor} (record it in AUDIT_LEDGER)"; print(msg)
         return 0, msg
     if not bp.is_file():
         msg = "INTEGRITY UNMEASURED no .aw/baseline.json (architect: integrity --write-baseline --i-am-architect)"; print(msg)
@@ -567,8 +565,8 @@ def cmd_patch(pos, fl, kv) -> int:
         print("  -> re-read the file and copy the anchor byte-for-byte (it must be unique), then retry")
         return 1
     i0 = hits[0]; span = lines[i0:i0 + len(ol)]; endings = [e for _c, e in span] or [lines[i0][1]]
-    repl = [(c, endings[min(n, len(endings) - 1)] if n < len(endings) else endings[-1]) for n, c in enumerate(nl)]
-    if len(repl) > len(span) and repl[-1][1] == "": repl[-1] = (repl[-1][0], "\n")  # a grown block must not glue itself onto the next line
+    nle = "\r\n" if b"\r\n" in rawf else "\n"; repl = [(c, endings[min(n, len(endings) - 1)]) for n, c in enumerate(nl)]
+    repl = [(c, e or nle) for c, e in repl[:-1]] + repl[-1:]  # only the block's last line may lack an ending (EOF): an inner one would glue two lines
     lines = lines[:i0] + repl + lines[i0 + len(ol):]; f.write_bytes("".join(c + e for c, e in lines).encode("utf-8"))
     print("PATCH OK %s (line endings kept: %s)" % (f, "CRLF" if b"\r\n" in rawf else "LF"))
     return 0

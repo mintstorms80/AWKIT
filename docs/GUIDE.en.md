@@ -44,7 +44,7 @@ SELFTEST PASS  failures=0  checks=<n>  skipped=<n>  seconds=<s>
 ```
 `<folder>` is the kit folder's name. If checks were skipped, a line `SKIPPED (UNMEASURED, not failures): ...` follows - skipped
 means "not measured", not "fine".
-Instead: `SELFTEST FAIL failures=<n>` -> do not install; send the `FAIL ...` lines to the architect. Only python 3.9+ is needed.
+Instead: `SELFTEST FAIL failures=<n>` -> do not install; send the `FAIL ...` lines to the architect. Only python 3.11+ is needed.
 
 ### 1.2 Install into the project
 ```
