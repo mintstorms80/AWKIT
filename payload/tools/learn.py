@@ -178,6 +178,26 @@ ag = ROOT / "AGENTS.md"
 if ag.exists() and len(ag.read_text(encoding="utf-8", errors="replace")) > 6500:
     sug("steering-sprawl", f"AGENTS.md is {len(ag.read_text(encoding='utf-8', errors='replace'))} chars (> 6500)", "Author: move mechanical rules to .aw/checks.d, judgement rules behind a pointer, delete no-op sentences")
 
+# 8. kit-behind: this project's kit is older than the kit named by KIT_HOME in tools/kit.env; silent when the key or the path is missing
+def _ver(p):
+    try:
+        return tuple(int(x) for x in p.read_text(encoding="utf-8").strip().split("."))
+    except (OSError, ValueError):
+        return None
+_kh = next((ln.split("=", 1)[1].strip() for ln in lines(ROOT / "tools" / "kit.env") if ln.startswith("KIT_HOME=")), "")
+_pv, _kv = _ver(ROOT / ".aw" / "KIT_VERSION"), _ver(Path(_kh) / "payload" / ".aw" / "KIT_VERSION") if _kh else None
+if _pv and _kv and _pv < _kv:
+    sug("kit-behind", f".aw/KIT_VERSION {'.'.join(map(str, _pv))} < {'.'.join(map(str, _kv))} at KIT_HOME {_kh}", "double-click UPGRADE_KIT.cmd (dry-run first, one key applies), then the Architect re-baselines")
+
+# 9. stale-proposal: a P-NN row still PROPOSED while >= 3 METRICS rows were written after its date
+_md = [m.group(1) for ln in lines(PL / "METRICS.md") if (m := re.match(r"\|\s*(\d{4}-\d\d-\d\d)\s*\|", ln))]
+for i, ln in enumerate(lines(PL / "PROPOSALS.md"), 1):
+    c = [x.strip() for x in ln.strip().strip("|").split("|")]
+    if len(c) >= 7 and re.fullmatch(r"P-\d+", c[0]) and re.fullmatch(r"\d{4}-\d\d-\d\d", c[1]) and c[-2].upper() == "PROPOSED":
+        n = sum(d > c[1] for d in _md)
+        if n >= 3:
+            sug("stale-proposal", f"{c[0]} PROPOSED since {c[1]}, {n} later METRICS rows, PROPOSALS.md:{i}", "decide it: ACCEPTED with a card, REJECTED with the reason, or NO_EFFECT; a proposal nobody moves is noise")
+
 for o in out:
     print(o)
 print("LEARN OK" if not out else f"LEARN SUGGEST {len(out)}")

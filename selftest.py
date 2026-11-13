@@ -1979,6 +1979,295 @@ def section_gaps_mod3(work: Path):
         skip("init_project.py exec bits", "Windows has no exec bit: UNMEASURED on Linux and macOS")
 
 
+def section_shape(work):
+    """Reply shape (2.9.0): critical questions and a skipped list; the one-question rule is gone from every prompt copy."""
+    arch = (KIT / "payload/.hermes/prompts/ARCHITECT.md").read_text(encoding="utf-8")
+    soul = (KIT / "profiles/hermes-architect.SOUL.md").read_text(encoding="utf-8")
+    old = re.compile(r"ONE critical question|1-2 closing lines|last 1-2 lines")
+    check("reply shape: payload ARCHITECT.md has the `Critical questions (usually 1-3, at most 5)` and `Skipped (no cap)` lines and no one-question rule",
+          "Critical questions (usually 1-3, at most 5)" in arch and "Skipped (no cap)" in arch and not old.search(arch))
+    check("reply shape: the thin architect SOUL names the critical questions (1-3, at most 5) and the skipped list and has no one-question rule",
+          "critical questions (1-3, at most 5" in soul and "skipped list" in soul and not old.search(soul))
+    left = [rel for p, rel in kit_files(KIT) if rel.startswith(("payload/", "profiles/")) and p.suffix in (".md", ".py", ".env", ".txt")
+            and old.search(p.read_text(encoding="utf-8", errors="replace"))]
+    check("reply shape: the old one-question rule is in no file of payload/ or profiles/", not left, left)
+
+
+def section_upgrade(work):
+    """M-06 (2.9.0): upgrade_project.py (u1-u16) and start_plan.cmd / START_PLAN_PROMPT.md (p1-p2); 2.9.1: upgrade_kit.cmd from the kit folder (u17-u18)."""
+    CUR = (KIT / "payload/.aw/KIT_VERSION").read_text(encoding="utf-8").strip()
+    import hashlib, io, tarfile, zipfile
+    UPG = str(KIT / "upgrade_project.py")
+    INIT = str(KIT / "init_project.py")
+    SETUP = str(KIT / "setup_project.py")
+    py = sys.executable
+    cfg = work / "upg_gitconfig"
+    cfg.write_text("[user]\n\tname = Test\n\temail = t@e.invalid\n", encoding="utf-8", newline="\n")
+    genv = {"GIT_CONFIG_GLOBAL": str(cfg)}
+
+    def export_ver(ver, dst):
+        shas = subprocess.check_output(["git", "-C", str(KIT), "log", "--format=%h", "--", "payload/.aw/KIT_VERSION"], text=True).split()
+        sha = next(h for h in shas if subprocess.check_output(["git", "-C", str(KIT), "show", f"{h}:payload/.aw/KIT_VERSION"], text=True).strip() == ver)
+        dst.mkdir(parents=True, exist_ok=True)
+        ar = subprocess.run(["git", "-C", str(KIT), "archive", sha], capture_output=True, check=True)
+        import io, tarfile
+        with tarfile.open(fileobj=io.BytesIO(ar.stdout)) as tf:
+            tf.extractall(dst, filter="data")
+        return sha
+
+    def make_old(ver, name, crlf=False, commit=True):
+        ok = work / f"oldkit_{ver}_{name}"
+        if not ok.exists():
+            export_ver(ver, ok)
+        p = work / f"upg_{name}"
+        subprocess.run([py, "-I", "-B", str(ok / "init_project.py"), str(p), "--name", name, "--lang", "bg", "--owner", "Owner"], check=True, capture_output=True)
+        if crlf:
+            for f in p.rglob("*"):
+                if f.is_file():
+                    b = f.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+                    f.write_bytes(b)
+        subprocess.run(["git", "-C", str(p), "init", "-q"], check=True, env=genv)
+        if commit:
+            subprocess.run(["git", "-C", str(p), "add", "-A"], check=True, env=genv)
+            subprocess.run(["git", "-C", str(p), "-c", "user.name=T", "-c", "user.email=t@e", "commit", "-q", "-m", "init"], check=True, env=genv)
+        return p
+
+    def tree_sha(root):
+        h = hashlib.sha256()
+        for f in sorted((x for x in root.rglob("*") if x.is_file() and ".git" not in x.parts), key=lambda x: x.relative_to(root).as_posix()):
+            h.update(f.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(f.read_bytes()).digest())
+        return h.hexdigest()
+
+    hist = subprocess.check_output(["git", "-C", str(KIT), "log", "-p", "--format=", "--", "payload/.aw/KIT_VERSION"], text=True)
+    OLDV = "2.6.4" if "+2.6.4" in hist else min(re.findall(r"^\+(2\.\d+\.\d+)$", hist, re.M), key=lambda v: tuple(map(int, v.split("."))))  # a public copy has a shorter history
+    P1 = make_old(OLDV, "u_main")
+    # Customize kit.env and STATE files to verify u5 and u6
+    ke0 = (P1 / "tools/kit.env").read_text(encoding="utf-8")
+    ke0 = re.sub(r"(?m)^TEST_CMD=.*$", "TEST_CMD=python3 -m unittest discover -s custom_tests", ke0)
+    ke0 = re.sub(r"(?m)^COUNT_REGEX=.*$", lambda _: "COUNT_REGEX=Ran ([0-9]+) custom", ke0)
+    (P1 / "tools/kit.env").write_text(ke0, encoding="utf-8", newline="\n")
+    (P1 / ".hermes/plans/WORKLOG.md").write_text("# custom worklog\n", encoding="utf-8", newline="\n")
+    (P1 / ".aw/ratchet.json").write_text('{"min_tests": 42}\n', encoding="utf-8", newline="\n")
+    # Customize one engine file (findings_lint.py) to test u3 LOCAL, remove review_pack.py to test u4 ADD
+    (P1 / "tools/findings_lint.py").write_bytes((P1 / "tools/findings_lint.py").read_bytes() + b"\n# local patch\n")
+    local_bytes = (P1 / "tools/findings_lint.py").read_bytes()
+    (P1 / "tools/review_pack.py").rename(P1 / "tools/review_pack.py.off")
+    if (P1 / "tools/effort.py").is_file():  # 2.8.0 and later ship it: take it away so u4 still proves ADD
+        (P1 / "tools/effort.py").rename(P1 / "tools/effort.py.off")
+    # Add START_ARCHITECT.cmd with local edit to test u16 LOCAL launcher
+    (P1 / "START_ARCHITECT.cmd").write_text("@echo off\nrem local launcher\n", encoding="utf-8", newline="\n")
+    old_aw_bytes = (P1 / "tools/aw.py").read_bytes()
+    old_ke_bytes = (P1 / "tools/kit.env").read_bytes()
+    state_before = {rel: (P1 / rel).read_bytes() for rel in (".hermes/plans/WORKLOG.md", ".hermes/plans/PLAN_latest.md", ".hermes/plans/AUDIT_LEDGER.md", ".aw/ratchet.json", ".aw/frozen.txt")}
+
+    # u1: dry-run writes nothing
+    sha0 = tree_sha(P1)
+    rc_dry, out_dry = sh([py, "-I", "-B", UPG, str(P1)])
+    check("u1 upgrade_project.py dry-run writes nothing (tree sha before == after) and prints KIT-UPGRADE PLAN",
+          rc_dry == 0 and tree_sha(P1) == sha0 and f"KIT-UPGRADE PLAN from={OLDV} to={CUR}" in out_dry, out_dry[-300:])
+
+    # u15: init_project.py --check before apply prints ENV missing_keys= and LAUNCHER missing= before KIT-CHECK
+    rc_chk0, out_chk0 = sh([py, "-I", "-B", INIT, "--check", str(P1)])
+    chk0_lines = [x.strip() for x in out_chk0.strip().splitlines() if not x.startswith("FIX:")]
+    check("u15 init_project.py --check prints ENV missing_keys=<n> and LAUNCHER missing=<n> right before the unchanged last KIT-CHECK line",
+          rc_chk0 == 1 and len(chk0_lines) >= 3 and chk0_lines[-3].startswith("ENV missing_keys=%d" % (7 if OLDV == "2.6.4" else 4))
+          and chk0_lines[-2].startswith("LAUNCHER missing=3") and chk0_lines[-1].startswith("KIT-CHECK engine_same="), chk0_lines[-4:])
+
+    # Apply upgrade on P1
+    rc_ap, out_ap = sh([py, "-I", "-B", UPG, str(P1), "--apply"])
+    # u2: REPLACE on equal old render
+    check("u2 upgrade_project.py --apply replaces untouched old engine files (REPLACE tools/aw.py, .hermes/prompts/ARCHITECT.md)",
+          rc_ap == 0 and "REPLACE tools/aw.py" in out_ap and (P1 / "tools/aw.py").read_bytes() == (KIT / "payload/tools/aw.py").read_bytes()
+          and "Owner" in (P1 / ".hermes/prompts/ARCHITECT.md").read_text(encoding="utf-8"), out_ap[-300:])
+    # u3: LOCAL engine file untouched + staged in kit_stage/
+    check("u3 LOCAL engine file is untouched and the new version is staged in kit_stage/",
+          "LOCAL tools/findings_lint.py" in out_ap and (P1 / "tools/findings_lint.py").read_bytes() == local_bytes
+          and (P1 / "kit_stage/tools/findings_lint.py").read_bytes() == (KIT / "payload/tools/findings_lint.py").read_bytes(), out_ap[-300:])
+    # u4: ADD missing engine tool
+    check("u4 ADD installs missing engine tools (tools/effort.py, tools/review_pack.py)",
+          "ADD tools/effort.py" in out_ap and "ADD tools/review_pack.py" in out_ap
+          and (P1 / "tools/effort.py").read_bytes() == (KIT / "payload/tools/effort.py").read_bytes()
+          and (P1 / "tools/review_pack.py").read_bytes() == (KIT / "payload/tools/review_pack.py").read_bytes(), out_ap[-300:])
+    # u5: kit.env new keys added, existing lines byte-for-byte
+    ke1 = (P1 / "tools/kit.env").read_bytes()
+    ke1_txt = ke1.decode("utf-8")
+    check("u5 tools/kit.env gets the missing keys while existing lines (PROJECT_NAME, TEST_CMD, COUNT_REGEX) stay byte-for-byte",
+          ke1.startswith(old_ke_bytes) and "TEST_CMD=python3 -m unittest discover -s custom_tests\n" in ke1_txt
+          and "COUNT_REGEX=Ran ([0-9]+) custom\n" in ke1_txt and "PROJECT_NAME=u_main\n" in ke1_txt
+          and all(f"\n{k}=" in ke1_txt for k in ("EFFORT_DEFAULT", "EFFORT_HARD", "EFFORT_WORKER", "OWNER", "REPLY_LANG", "KIT_HOME", "MODEL_PLAN")), ke1_txt[-300:])
+    # u6: STATE files untouched
+    check("u6 STATE files (WORKLOG, PLAN_latest, AUDIT_LEDGER, ratchet.json, frozen.txt) are untouched byte-for-byte",
+          all((P1 / rel).read_bytes() == b for rel, b in state_before.items()))
+    # u8: backup zip holds old bytes of replaced files and kit.env
+    zfiles = list((P1 / ".hermes/plans/backups").glob(f"KIT-{OLDV}-*.zip"))
+    z_aw, z_ke = (zipfile.ZipFile(zfiles[0]).read("tools/aw.py"), zipfile.ZipFile(zfiles[0]).read("tools/kit.env")) if zfiles else (b"", b"")
+    check("u8 backup zip in .hermes/plans/backups/KIT-<old>-<date>.zip holds the old bytes of replaced files and tools/kit.env",
+          len(zfiles) == 1 and z_aw == old_aw_bytes and z_ke == old_ke_bytes, [z.name for z in zfiles])
+    # u9: second --apply prints zeros
+    rc_ap2, out_ap2 = sh([py, "-I", "-B", UPG, str(P1), "--apply"])
+    check("u9 second --apply is idempotent (replace=0 add=0 keys=0)",
+          rc_ap2 == 0 and "replace=0 add=0 local=2 keys=0" in out_ap2, out_ap2[-200:])
+    # u13: no '{{' in any written file
+    leftover_ph = [f.relative_to(P1).as_posix() for f in P1.rglob("*") if f.is_file() and ".git" not in f.parts and re.search(rb"\{\{[A-Z_][A-Z0-9_]*\}\}", f.read_bytes())]
+    check("u13 no written file in the upgraded project contains an unfilled '{{' placeholder", not leftover_ph, leftover_ph)
+    # u14: .aw/KIT_VERSION is ordered last in the action list and holds the kit version
+    act_lines = [ln for ln in out_ap.splitlines() if ln.startswith(("REPLACE ", "ADD ", "LOCAL ", "SAME "))]
+    check("u14 .aw/KIT_VERSION is processed last and updated to the kit version",
+          bool(act_lines) and act_lines[-1].endswith(" .aw/KIT_VERSION") and (P1 / ".aw/KIT_VERSION").read_text(encoding="utf-8").strip() == CUR, act_lines[-3:])
+    # u16: launchers ADD and LOCAL
+    check("u16 launchers: missing START_PLAN.cmd/START_WORKER.cmd/UPGRADE_KIT.cmd are ADDed, edited START_ARCHITECT.cmd is LOCAL + staged",
+          "ADD START_PLAN.cmd" in out_ap and "ADD START_WORKER.cmd" in out_ap and "ADD UPGRADE_KIT.cmd" in out_ap
+          and "LOCAL START_ARCHITECT.cmd" in out_ap and (P1 / "kit_stage/START_ARCHITECT.cmd").is_file()
+          and (P1 / "START_PLAN.cmd").is_file() and (P1 / "UPGRADE_KIT.cmd").is_file(), out_ap[-300:])
+
+    # u17, u18 (2.9.1): a 2.8.4-or-older project has no UPGRADE_KIT.cmd yet, so the kit's own upgrade_kit.cmd takes the project folder as %1
+    if os.name == "nt":
+        e_dd = {k: v for k, v in os.environ.items() if k != "AW_KIT_HOME"}
+        Pdd = make_old("2.8.4", "u_drag")
+        r_dd = subprocess.run(["cmd", "/c", str(KIT / "upgrade_kit.cmd"), str(Pdd)], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=300, env=e_dd)
+        check("u17 upgrade_kit.cmd in the kit folder upgrades the project folder dragged onto it (%1): dry-run, then --apply, KIT_VERSION = the kit's",
+              "KIT-UPGRADE PLAN from=2.8.4" in r_dd.stdout and "KIT-UPGRADE DONE from=2.8.4" in r_dd.stdout
+              and (Pdd / ".aw/KIT_VERSION").read_text(encoding="utf-8").strip() == CUR and (Pdd / "UPGRADE_KIT.cmd").is_file(), (r_dd.returncode, r_dd.stdout[-400:]))
+        r_00 = subprocess.run(["cmd", "/c", str(KIT / "upgrade_kit.cmd")], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60, env=e_dd)
+        check("u18 upgrade_kit.cmd double-clicked in the kit folder (no project folder) says to drag the project folder onto it and exits 1",
+              r_00.returncode == 1 and "drag the project folder onto upgrade_kit.cmd" in r_00.stdout and "KIT-UPGRADE" not in r_00.stdout, r_00.stdout[-300:])
+    else:
+        skip("u17 upgrade_kit.cmd drag-and-drop", "cmd.exe exists only on Windows")
+        skip("u18 upgrade_kit.cmd without a project folder", "cmd.exe exists only on Windows")
+
+    bare = [f"{c.name}:{i}" for c in sorted(KIT.glob("*.cmd")) for i, ln in enumerate(c.read_text(encoding="utf-8", errors="replace").splitlines(), 1)
+            if re.match(r"\s*%PY%\s", ln)]
+    check("u19 every %PY% line of the kit launchers starts with `call` (a python.cmd shim first on PATH ends a batch file that runs it bare: measured, u17 stopped after the dry-run)",
+          not bare, bare)
+
+    # u7: CRLF project stays CRLF
+    Pcrlf = make_old("2.8.1", "u_crlf", crlf=True)
+    rc_c, out_c = sh([py, "-I", "-B", UPG, str(Pcrlf), "--apply"])
+    aw_crlf = (Pcrlf / "tools/aw.py").read_bytes()
+    ke_crlf = (Pcrlf / "tools/kit.env").read_bytes()
+    check("u7 CRLF project stays CRLF across replaced files, added files and tools/kit.env",
+          rc_c == 0 and b"\r\n" in aw_crlf and b"\n" not in aw_crlf.replace(b"\r\n", b"")
+          and b"\r\n" in ke_crlf and b"\n" not in ke_crlf.replace(b"\r\n", b""), out_c[-200:])
+
+    # u10, u11, u12: the three refusals (no commit, unknown version, newer target)
+    P_nocommit = make_old("2.8.1", "u_nocommit", commit=False)
+    sha_nc = tree_sha(P_nocommit)
+    r10, o10 = sh([py, "-I", "-B", UPG, str(P_nocommit), "--apply"])
+    check("u10 refuses a target with no git commit (exit 2, REFUSED:, nothing written)",
+          r10 == 2 and "REFUSED:" in o10 and tree_sha(P_nocommit) == sha_nc, o10)
+
+    P_unk = make_old("2.8.1", "u_unk")
+    (P_unk / ".aw/KIT_VERSION").write_text("2.0.1\n", encoding="utf-8", newline="\n")
+    sha_uk = tree_sha(P_unk)
+    r11, o11 = sh([py, "-I", "-B", UPG, str(P_unk), "--apply"])
+    check("u11 refuses a target whose KIT_VERSION is not in git history (exit 2, REFUSED:, nothing written)",
+          r11 == 2 and "REFUSED:" in o11 and "not in the kit's git history" in o11 and tree_sha(P_unk) == sha_uk, o11)
+
+    P_new = make_old("2.8.4", "u_newer")
+    (P_new / ".aw/KIT_VERSION").write_text("9.9.9\n", encoding="utf-8", newline="\n")
+    sha_nw = tree_sha(P_new)
+    r12, o12 = sh([py, "-I", "-B", UPG, str(P_new), "--apply"])
+    check("u12 refuses a target newer than the kit (exit 2, REFUSED:, nothing written)",
+          r12 == 2 and "REFUSED:" in o12 and "is newer than kit" in o12 and tree_sha(P_new) == sha_nw, o12)
+
+    # p2: setup_project.py installs START_PLAN.cmd, UPGRADE_KIT.cmd and START_PLAN_PROMPT.md (forbidding cards)
+    SP = work / "setup_plan_test"
+    SP.mkdir(parents=True, exist_ok=True)
+    rc_sp, out_sp = sh([py, "-B", SETUP, str(SP), "setup_plan_test"], cwd=SP, env=genv)
+    spp = SP / ".hermes/START_PLAN_PROMPT.md"
+    spp_txt = spp.read_text(encoding="utf-8") if spp.is_file() else ""
+    check("p2 setup_project.py installs START_PLAN.cmd, UPGRADE_KIT.cmd and .hermes/START_PLAN_PROMPT.md (which forbids writing cards/queues and points to START_ARCHITECT.cmd)",
+          rc_sp == 0 and (SP / "START_PLAN.cmd").is_file() and (SP / "UPGRADE_KIT.cmd").is_file()
+          and spp.is_file() and "Never write a task card" in spp_txt and "START_ARCHITECT.cmd" in spp_txt, (rc_sp, spp_txt[:200]))
+
+    # p1: start_plan.cmd passes -m from MODEL_PLAN, and when empty falls back to default model
+    fbin = work / "fakebin_plan"
+    fbin.mkdir(exist_ok=True)
+    (fbin / "hermes.cmd").write_bytes(b'@echo off\r\n>"%AW_FAKE_OUT%" echo %*\r\n')
+    path_ = str(fbin) + os.pathsep + str(Path(py).parent) + os.pathsep + os.environ.get("PATH", "")
+    fout = work / "fake_plan_out.txt"
+    def run_plan_cmd(extra=None):
+        fout_i = work / f"fake_plan_{len(os.listdir(work))}.txt"
+        e_ = {k_: v_ for k_, v_ in os.environ.items() if not k_.startswith("AW_")}
+        e_.update({"PATH": path_, "AW_FAKE_OUT": str(fout_i)})
+        e_.update(extra or {})
+        subprocess.run(["cmd", "/c", "START_PLAN.cmd"], cwd=str(SP), env=e_, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        return fout_i.read_text(encoding="utf-8", errors="replace").strip() if fout_i.exists() else ""
+    p_def = run_plan_cmd()
+    ke_sp = (SP / "tools/kit.env").read_text(encoding="utf-8")
+    (SP / "tools/kit.env").write_text(ke_sp.replace("MODEL_PLAN=", "MODEL_PLAN=claude-opus-5-5"), encoding="utf-8", newline="\n")
+    p_set = run_plan_cmd()
+    check("p1 START_PLAN.cmd passes -m from MODEL_PLAN in tools/kit.env (claude-opus-5-5), and when MODEL_PLAN is empty falls back to the default model (claude-sonnet-5-5)",
+          "-m claude-sonnet-5-5" in p_def and "START_PLAN_PROMPT.md" in p_def
+          and "-m claude-opus-5-5" in p_set and "START_PLAN_PROMPT.md" in p_set, (p_def, p_set))
+
+
+def section_learn(work):
+    """M-07 (2.9.0): learn.py kit-behind / stale-proposal (l1-l3) and dev/harvest.py (h1-h4)."""
+    import hashlib
+    LRN, HRV, py = KIT / "payload/tools/learn.py", str(KIT / "dev/harvest.py"), sys.executable
+
+    def proj(name, ver="2.8.4", kit_home=None, proposals=(), metrics=(), learn=True):
+        p = work / f"lrn_{name}"
+        (p / ".aw").mkdir(parents=True, exist_ok=True)
+        (p / ".hermes/plans").mkdir(parents=True, exist_ok=True)
+        (p / "tools").mkdir(parents=True, exist_ok=True)
+        (p / ".aw/KIT_VERSION").write_text(ver + "\n", encoding="utf-8", newline="\n")
+        (p / "tools/kit.env").write_text("TEST_CMD=x\n" + (f"KIT_HOME={kit_home}\n" if kit_home else ""), encoding="utf-8", newline="\n")
+        (p / ".hermes/plans/PROPOSALS.md").write_text("| ID | Date | Proposal | Closes | Owner | Status | Evidence |\n|---|---|---|---|---|---|---|\n"
+                                                      + "".join(f"| {i} | {d} | a check | - | Architect | {s} | x |\n" for i, d, s in proposals), encoding="utf-8", newline="\n")
+        (p / ".hermes/plans/METRICS.md").write_text("| Date | Type |\n|---|---|\n" + "".join(f"| {d} | queue |\n" for d in metrics), encoding="utf-8", newline="\n")
+        if learn:
+            shutil.copy(LRN, p / "tools/learn.py")
+        return p
+
+    def learn(p):
+        r = subprocess.run([py, "-I", "-B", str(LRN), str(p)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        return r.returncode, r.stdout
+
+    kit = work / "lrn_kit"
+    (kit / "payload/.aw").mkdir(parents=True, exist_ok=True)
+    (kit / "payload/.aw/KIT_VERSION").write_text("2.9.0\n", encoding="utf-8", newline="\n")
+    rc_b, o_b = learn(proj("behind", kit_home=kit.as_posix()))
+    rc_s, o_s = learn(proj("same", ver="2.9.0", kit_home=kit.as_posix()))
+    check("l1 learn.py: kit-behind fires when .aw/KIT_VERSION (2.8.4) < KIT_HOME/payload/.aw/KIT_VERSION (2.9.0) and names UPGRADE_KIT.cmd; an equal version is silent",
+          rc_b == 0 and "LEARN SUGGEST kit-behind | .aw/KIT_VERSION 2.8.4 < 2.9.0" in o_b and "UPGRADE_KIT.cmd" in o_b
+          and rc_s == 0 and "kit-behind" not in o_s, (o_b, o_s))
+    rc_n, o_n = learn(proj("nokey"))
+    rc_g, o_g = learn(proj("gone", kit_home=(work / "no_such_kit").as_posix()))
+    check("l2 learn.py: no KIT_HOME key, or a KIT_HOME path that does not exist, is silent and does not crash (exit 0, no kit-behind)",
+          rc_n == 0 and rc_g == 0 and "kit-behind" not in o_n + o_g and "Traceback" not in o_n + o_g, (o_n, o_g))
+    rc_3, o_3 = learn(proj("stale3", proposals=[("P-01", "2026-01-01", "PROPOSED"), ("P-02", "2026-01-01", "VERIFIED")],
+                           metrics=["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]))
+    rc_2, o_2 = learn(proj("stale2", proposals=[("P-01", "2026-01-01", "PROPOSED")], metrics=["2026-01-01", "2026-01-02", "2026-01-03"]))
+    check("l3 learn.py: stale-proposal fires for a PROPOSED row with 3 later METRICS rows (cites PROPOSALS.md:3, a VERIFIED row and a same-day row do not count) and is silent at 2 later rows",
+          "LEARN SUGGEST stale-proposal | P-01 PROPOSED since 2026-01-01, 3 later METRICS rows, PROPOSALS.md:3" in o_3 and "P-02" not in o_3
+          and "stale-proposal" not in o_2, (o_3, o_2))
+
+    def tree_sha(p):
+        h = hashlib.sha256()
+        for f in sorted(x for x in p.rglob("*") if x.is_file()):
+            h.update(f.relative_to(p).as_posix().encode() + b"\0" + f.read_bytes())
+        return h.hexdigest()
+    a = proj("ha", kit_home=kit.as_posix(), proposals=[("P-01", "2026-01-01", "PROPOSED")])
+    b = proj("hb", kit_home=kit.as_posix())
+    c = proj("hc", learn=False)
+    before = [tree_sha(x) for x in (a, b, c)]
+    r = subprocess.run([py, "-I", "-B", HRV, str(a), str(b), str(c)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+    out = r.stdout.splitlines()
+    check("h1 harvest.py writes nothing in the projects it reads (tree sha before == after for all three)",
+          r.returncode == 0 and [tree_sha(x) for x in (a, b, c)] == before, r.stdout + r.stderr)
+    check("h2 harvest.py: a family met in 2 projects is cross_project (kit-behind in lrn_ha and lrn_hb), one met once is not (proposed)",
+          "CROSS kit-behind projects=2" in out and not any(x.startswith("CROSS proposed") for x in out)
+          and "CANDIDATE lrn_ha:PROPOSALS.md:3 proposed | P-01 a check" in out, out)
+    check("h3 harvest.py: a project without tools/learn.py is `SKIP <name> no tools/learn.py`, not a crash",
+          "SKIP lrn_hc no tools/learn.py" in out and "Traceback" not in r.stderr, (out, r.stderr))
+    check("h4 harvest.py: the last line is `HARVEST projects=2 suggestions=3 families=2 cross_project=1`",
+          bool(out) and out[-1] == "HARVEST projects=2 suggestions=3 families=2 cross_project=1", out[-3:])
+
+
 def main() -> int:
     t0 = time.time()
     given = len(sys.argv) > 1 and not sys.argv[1].startswith("-")
@@ -2991,6 +3280,9 @@ Last line: `QUEUE DONE <n PASS> / <n FAIL> / <n STOP>`
     section_gaps4(work)
     section_gaps5(work)
     section_gaps_mod3(work)
+    section_shape(work)
+    section_upgrade(work)
+    section_learn(work)
     section_lint(work)
 
     # ---- every pristine check must still exist (allowing a documented rename)

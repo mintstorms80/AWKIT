@@ -104,6 +104,12 @@ def check(target: Path) -> int:
         txt = g.read_text(encoding="utf-8", errors="replace")
         pick = [lang for lang, name in LANGS.items() if _guide(lang).read_text(encoding="utf-8", errors="replace") == txt]
         print("STATE .hermes/plans/GUIDE.md" + (f" (matches docs/GUIDE.{pick[0]}.md)" if pick else " (edited after install)"))
+    ke = target / "tools/kit.env"
+    khave = set(re.findall(r"(?m)^([A-Z_][A-Z0-9_]*)=", ke.read_text(encoding="utf-8", errors="replace"))) if ke.is_file() else set()
+    kwant = set(re.findall(r"(?m)^([A-Z_][A-Z0-9_]*)=", (PAYLOAD / "tools/kit.env").read_text(encoding="utf-8")))
+    print(f"ENV missing_keys={len(kwant - khave)}")
+    lmiss = sum(not (target / f).is_file() for f in ("START_ARCHITECT.cmd", "START_WORKER.cmd", "START_PLAN.cmd", "UPGRADE_KIT.cmd"))
+    print(f"LAUNCHER missing={lmiss}")
     print(f"KIT-CHECK engine_same={same} engine_diff={diff} missing={missing}")
     if diff or missing:
         print("FIX: re-install the engine files (`python3 init_project.py <dir>`) - they land in kit_stage/ and you merge by hand;"

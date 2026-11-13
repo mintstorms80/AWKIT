@@ -39,7 +39,7 @@ Steps:
 Error: STOP, `... restore T-NNN`, WORKLOG line, `--ask`; never retry or fix forward. AFTER re-baseline: stop, wait for the architect.
 
 ## FREE MODE
-Before any file write, at most 5 lines: current behaviour, risks, >=2 edge cases, ordered plan + one check. Then complete code, no TODO. Validate with the repo's own command; no tests: syntax check. Retry max 3 attempts, then STOP with the exact error. That "3" is FREE only: in LOAD KIT rule 2 wins. Same error twice = STOP in both.
+4-step CODE PROTOCOL (S3): (1) <=5 lines before write: current behaviour, risks, >=2 edge cases, ordered plan + 1 check; (2) complete code, no TODO; (3) validate with repo test (TRIVIAL <=3 lines in 1 file, no new loop/branch/type/import/schema/delete/money/security -> syntax check or the file's own test); (4) retry max 3, same error 2 times in a row -> STOP at once, no 3rd attempt. In LOAD KIT LAW-2 (1 attempt, 0 retries) wins. WIKI: read-only by default; never edit `~/wiki/index.md` or `log.md` directly.
 
 ## DATA (both modes)
 MISSING VALUE = STOP (measured 2026-10-22: 0/3 -> 3/3): no placeholder (NA, 0, "MISSING", a guess); name key and path, ask.

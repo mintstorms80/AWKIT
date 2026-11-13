@@ -73,12 +73,19 @@ You are the ARCHITECT for this project. Reply, and write every file the owner wi
 6. Anything that is the owner's decision (domain content, money, secrets, commits) becomes ONE questionnaire, not a guess.
 7. Never commit, push or delete. End with the output shape from ARCHITECT.md and the queue START BLOCK to paste into the worker.
 """, encoding="utf-8", newline="\n")
-launcher = KIT / "start_architect.cmd"
-if launcher.exists():
-    (target / "START_ARCHITECT.cmd").write_bytes(launcher.read_bytes())
-worker_launcher = KIT / "start_worker.cmd"
-if worker_launcher.exists():
-    (target / "START_WORKER.cmd").write_bytes(worker_launcher.read_bytes())
+START_PLAN_PROMPT_TEXT = """# START_PLAN_PROMPT (written by setup_project.py; the plan/accept Architect start reads it as its first task)
+You are the ARCHITECT in PLAN and ACCEPT mode (fleet/roles.md, D-06/D-09). Never write a task card (`cards/<ID>.md`) or a queue (`cards/QUEUE_*.md`) in this session; card authoring and dry-runs belong to `START_ARCHITECT.cmd`.
+1. Session start: `python3 -I -B tools/aw.py doctor`, then `report`; read `AGENTS.md` whole, `.hermes/prompts/ARCHITECT.md` and `.hermes/plans/PLAYBOOK.md` once.
+2. Check `python3 -I -B tools/effort.py stage` against `Session effort:` (PLAYBOOK section 12).
+3. If a worker queue finished (`QUEUE DONE` in WORKLOG): re-run `bash tools/gate.sh active` and `python3 -I -B tools/aw.py integrity` yourself, verify raw tails in `gate_output/`, raise the ratchet ONCE (`python3 -I -B tools/aw.py ratchet --raise <measured> --i-am-architect`), append ONE `ARCH-ACCEPT` block in `AUDIT_LEDGER.md` section 8 and one row in `METRICS.md`.
+4. Otherwise plan or audit: write `QUESTIONNAIRE_<date>.md`, `AUTHOR_ANSWERS_<date>.md`, `PLAN_latest.md` sections 1-5, `MODULES.md` (`python3 -I -B tools/aw.py modules`), `ROADMAP.md` and audit registers (`AUDIT_LEDGER.md`, `ARCHITECT_FEEDBACK.md`, `PROPOSALS.md`, `DECISIONS.md`).
+5. Stop in the output shape of `ARCHITECT.md` and tell the owner to double-click `START_ARCHITECT.cmd` to author and dry-run the wave's cards.
+"""
+(target / ".hermes" / "START_PLAN_PROMPT.md").write_text(START_PLAN_PROMPT_TEXT, encoding="utf-8", newline="\n")
+for _src, _dst in (("start_architect.cmd", "START_ARCHITECT.cmd"), ("start_worker.cmd", "START_WORKER.cmd"),
+                   ("start_plan.cmd", "START_PLAN.cmd"), ("upgrade_kit.cmd", "UPGRADE_KIT.cmd")):
+    if (KIT / _src).exists():
+        (target / _dst).write_bytes((KIT / _src).read_bytes())
 gi = target / ".gitignore"
 if not gi.exists():
     gi.write_text(".env\nbackups/\nkit_stage/\n__pycache__/\n", newline="\n")

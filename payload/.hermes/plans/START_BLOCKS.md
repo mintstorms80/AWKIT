@@ -62,7 +62,7 @@ ROLE: ARCHITECT. Read REPORT_latest.md, WORKLOG (tail), AUDIT_LEDGER (§1-3 + ta
 3) CLOSE what is proven: `aw.py ratchet --raise <measured> --i-am-architect`; one `ARCH-ACCEPT` row with YOUR numbers + explicit `UNMEASURED:` list.
 4) RE-BASELINE only if a card legitimately changed a frozen file (`--write-baseline --i-am-architect --allow <path>`, one per flag).
 5) NEXT QUEUE (card-lint + queue-check green) + ONE block.
-OUT: 3 bullets MEASURED/UNMEASURED (state, risk, next move), the paths written, ONE critical question.
+OUT: 3 bullets MEASURED/UNMEASURED (state, risk, next move), the paths written, the critical questions and the skipped list as ARCHITECT.md defines them.
 ```
 
 ## BLOCK X — FIX-ORDER close-out (the Author says "fix it")
