@@ -1,6 +1,6 @@
 name: selftest
 
-# Windows is the platform the maintainer measured (163 checks, green and red paths).
+# Windows is the platform the maintainer measured (330 checks in 2.9.1, green and red paths).
 # Python: 3.11 and 3.14 measured locally; the matrix runs 3.11 and 3.13 (3.11 caught one 3.12-only f-string).
 # A Linux/macOS job is welcome as a pull request: the suite skips the cmd.exe tests there,
 # but nobody has run it on Linux yet, so it is not claimed to pass.
@@ -20,6 +20,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the upgrade tests rebuild old kit versions from the git history
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
