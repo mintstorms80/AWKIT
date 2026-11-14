@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2.9.2 - 2026-11-14
+### Added - two rules from Rylaa/fable5.2-opus5.5-orchestrator (MIT)
+- `CARD_PATTERNS.md` Failure and refusal: a model DECLINE is not a FAIL; the same card bytes go once to the next tier, a card is never reworded past a refusal, a second decline = STOP + QUESTION.
+- `SWARM.md` section 4 REPLY: `noticed:` lines carry out-of-scope findings instead of dropping them.
+- `NOTICE.md` row (taken / not taken); `selftest.py` +1 check and the NOTICE source lists, 330 -> 331.
+### Added - two rules from google/elephant-goldfish-model (Apache-2.0, own wording)
+- `SWARM.md` section 13: the Reviewer's reply opens with the goal in its own words; a wrong paraphrase voids the verdict. A review in the same context (no spawn tool) is `self-review` and never counts as the pre-raise or release review. Section 3, 8, 12, 13 trimmed (duplicates, attribution wording) to stay under the 10000-char budget (9993).
+- `CARD_PATTERNS.md` cold read: the fresh reader restates the card's GOAL first (four answers, not three).
+- `NOTICE.md` row; `selftest.py` +1 check, 331 -> 332. Not taken: the plugin itself, the drift report (kit-lint covers the kit; a project uses a CENSUS card), Blocker/Major/Nit severity.
+### Not taken
+- The Claude Code hooks (solo guard, naming gate, per-prompt reminder, tmux reaping): Claude Code plugin, macOS/Linux only (`ps`, `tmux`); the kit runs on Hermes and Windows. Fable/Sonnet/Opus routing and the `high` effort cap: the kit has its own tiers (`start_plan.cmd`, `start_architect.cmd`, `start_worker.cmd`) and `effort.py`. Worker report contract and 40-line cap: SWARM sections 4 and 6 already carry them (NEEDS-VALIDATION = "uncertain because X").
+### Fixed
+- `CARD_PATTERNS.md` decline rule, after the fresh-context review (VERDICT: BLOCK): the next tier runs the UNCHANGED card (id, lane, line 3 stay), a move to SPEC is a re-lane (new card), a decline on the strongest tier = STOP; "cheap worker -> SPEC executor" contradicted line 3 and the SPEC lane (never queued). The CHANGELOG no longer cites `fleet/roles.md` (a project file, not in the kit).
+
 ## 2.9.1 - 2026-11-13
 ### Fixed - the first upgrade of an old project had no double-click
 - A project on 2.8.4 or older has no `UPGRADE_KIT.cmd` (the upgrade itself ADDs it), so the Author could not start the first upgrade (measured on TestKit 2.8.1). `upgrade_kit.cmd` in the kit folder now takes the project folder as `%1`: drag the project folder onto it. Inside a project (`UPGRADE_KIT.cmd`) a plain double-click works as before. Double-clicked in the kit folder with no folder it says what to do and exits 1.

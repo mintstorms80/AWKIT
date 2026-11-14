@@ -2691,15 +2691,22 @@ def main() -> int:
         rc, fo5 = sh([sys.executable, "-I", "-B", "tools/learn.py", _fx5], cwd=I)
     check("learn.py: 3 FAIL of one card => third-fail (and not unstable-card)", "third-fail | T-009" in fo5 and "unstable-card" not in fo5, fo5)
     _notice = (Path(__file__).parent / "NOTICE.md").read_text(encoding="utf-8")
-    _src = ("DannyMac180/skills", "DannyMac180/fable-advisor", "vercel-labs/agent-desktop", "mattpocock/skills", "obra/superpowers", "anthropics/skills", "cloudflare/security-audit-skill", "ckelsoe/prompt-architect", "skillsdirectory.com")
+    _src = ("DannyMac180/skills", "DannyMac180/fable-advisor", "vercel-labs/agent-desktop", "mattpocock/skills", "obra/superpowers", "anthropics/skills", "cloudflare/security-audit-skill", "ckelsoe/prompt-architect", "skillsdirectory.com", "Rylaa/fable5.2-opus5.5-orchestrator", "google/elephant-goldfish-model")
     _payload_txt = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in (Path(__file__).parent / "payload").rglob("*") if p.is_file() and p.suffix in {".md", ".py", ".sh"})
-    _named = [n for n in ("fable-advisor", "agent-desktop", "mattpocock/skills", "obra/superpowers", "anthropics/skills", "cloudflare/security-audit-skill", "ckelsoe/prompt-architect", "skillsdirectory.com", "DannyMac180") if n in _payload_txt]
+    _named = [n for n in ("fable-advisor", "agent-desktop", "mattpocock/skills", "obra/superpowers", "anthropics/skills", "cloudflare/security-audit-skill", "ckelsoe/prompt-architect", "skillsdirectory.com", "DannyMac180", "Rylaa/fable5.2-opus5.5-orchestrator", "google/elephant-goldfish-model") if n in _payload_txt]
     check("NOTICE.md lists every source (and meta-agent as 'nothing copied'); every source named in the payload has a row; meta-agent is not in the payload",
           all(s in _notice for s in _src) and "meta-agent" in _notice and "nothing copied" in _notice
           and all(n in _notice for n in _named) and "meta-agent" not in _payload_txt, str(_named))
     check("TASK_CARD.template.md: the SPEC lane carries the Surgical rule; NOTICE.md lists andrej-karpathy-skills",
           "Surgical: every changed line traces to the GOAL" in (Path(__file__).parent / "payload/.hermes/plans/TASK_CARD.template.md").read_text(encoding="utf-8")
           and "andrej-karpathy-skills" in (Path(__file__).parent / "NOTICE.md").read_text(encoding="utf-8"), "")
+    check("CARD_PATTERNS: a DECLINE sends the SAME card bytes to the next tier, never reworded; SWARM REPLY has `noticed:` lines",
+          "the SAME card bytes go once to the next tier" in (Path(__file__).parent / "payload/.hermes/plans/CARD_PATTERNS.md").read_text(encoding="utf-8")
+          and "`noticed:` out-of-scope lines" in (Path(__file__).parent / "payload/.hermes/prompts/SWARM.md").read_text(encoding="utf-8"), "")
+    check("Reviewer opens with the goal in its own words; same context = `self-review`, never the pre-raise review; cold read asks the GOAL first",
+          "opening with the goal in its own words" in (Path(__file__).parent / "payload/.hermes/prompts/SWARM.md").read_text(encoding="utf-8")
+          and "= `self-review`, never the pre-raise or release review" in (Path(__file__).parent / "payload/.hermes/prompts/SWARM.md").read_text(encoding="utf-8")
+          and "ask its GOAL in its own words" in (Path(__file__).parent / "payload/.hermes/plans/CARD_PATTERNS.md").read_text(encoding="utf-8"), "")
     with tempfile.TemporaryDirectory() as _fl:
         _good = Path(_fl) / "good.md"
         _good.write_text("\n".join([
